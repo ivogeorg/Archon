@@ -47,6 +47,9 @@ e2e-screenshots/
 
 # Agent artifacts (generated, local only)
 .agents/
+
+# repo-deep-dive workflow output (generated, local only)
+repo-deep-dive/
 .agents/rca-reports/
 .agents/plans/
 .agents/pr-reviews
