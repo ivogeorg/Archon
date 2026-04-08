@@ -1,0 +1,584 @@
+name: repo-deep-dive
+description: |
+  Use when: User wants to understand, document, or analyze a codebase.
+  Triggers: "repo deep dive", "understand this repo", "document codebase", "repo-deep-dive",
+            "analyze codebase", "comprehend repo", "summarize codebase", "document this repo".
+  Input: Optional depth as $1: summary | overview | deep (default: overview).
+         Optional repo URL as $1 (depth then becomes $2): not yet implemented.
+  Does: Scans the repo structure then generates documentation at the chosen depth level:
+        summary  — one-paragraph distillation of purpose and function.
+        overview — capabilities, architecture, integration points, and public contact surfaces.
+        deep     — comprehensive ReadTheDocs-style docs (four parallel analysts + synthesis).
+  Output: Writes to repo-deep-dive/{repo-name}/ in the working directory.
+          Multiple repos accumulate cleanly: repo-deep-dive/Archon/, repo-deep-dive/other-repo/, ...
+  NOT for: Code changes, bug fixes, PR reviews, or running tests.
+
+provider: claude
+model: sonnet
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 1: SCAN + CLASSIFY + SETUP (all parallel, no dependencies)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scan
+    bash: |
+      set -e
+
+      echo "=== REPO IDENTITY ==="
+      echo "CWD: $(pwd)"
+      echo "Git root: $(git rev-parse --show-toplevel 2>/dev/null || echo 'not a git repo')"
+      echo "Git remote: $(git remote get-url origin 2>/dev/null || echo 'none')"
+      echo "Default branch: $(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo 'unknown')"
+      echo "Last commit: $(git log -1 --format='%H %s' 2>/dev/null || echo 'none')"
+      echo ""
+
+      echo "=== DIRECTORY TREE (depth 3, excluding noise) ==="
+      find . -not -path '*/node_modules/*' -not -path '*/.git/*' \
+             -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/__pycache__/*' \
+             -not -path '*/.next/*' -not -path '*/target/*' -not -path '*/vendor/*' \
+             -not -path '*/.venv/*' -not -path '*/venv/*' -not -path '*/coverage/*' \
+             -maxdepth 3 -type f | sort | head -200
+      echo ""
+
+      echo "=== FILE COUNTS BY EXTENSION ==="
+      find . -not -path '*/node_modules/*' -not -path '*/.git/*' \
+             -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/__pycache__/*' \
+             -not -path '*/.next/*' -not -path '*/target/*' -not -path '*/vendor/*' \
+             -type f | grep -oE '\.[a-zA-Z0-9]+$' | sort | uniq -c | sort -rn | head -20
+      echo ""
+
+      echo "=== README ==="
+      for f in README.md README.rst README.txt README; do
+        if [ -f "$f" ]; then cat "$f"; break; fi
+      done
+      echo ""
+
+      echo "=== PACKAGE MANIFEST ==="
+      for f in package.json pyproject.toml Cargo.toml go.mod composer.json Gemfile build.gradle; do
+        if [ -f "$f" ]; then
+          echo "--- $f ---"
+          head -80 "$f"
+          echo ""
+        fi
+      done
+
+      echo "=== ENTRY POINTS (candidates) ==="
+      for f in src/index.ts src/index.js src/main.ts src/main.js src/main.py \
+               main.py main.go cmd/main.go lib/index.js index.js index.ts \
+               app.ts app.py app.js server.ts server.js; do
+        if [ -f "$f" ]; then echo "  $f"; fi
+      done
+      echo ""
+
+      echo "=== ENV EXAMPLE ==="
+      for f in .env.example .env.sample .env.template; do
+        if [ -f "$f" ]; then
+          echo "--- $f ---"
+          cat "$f"
+        fi
+      done
+      echo ""
+
+      echo "=== CI/CD ==="
+      CICD_FILES=$(find .github/workflows -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
+      if [ -n "$CICD_FILES" ]; then
+        echo "$CICD_FILES" | while read -r f; do
+          echo "--- $f ---"
+          head -25 "$f"
+        done
+      else
+        echo "No GitHub Actions found"
+      fi
+    timeout: 30000
+
+  # Normalize depth: "summary" | "overview" | "deep" (default: overview)
+  - id: classify-depth
+    bash: |
+      DEPTH_ARG="$1"
+      case "$DEPTH_ARG" in
+        summary) echo "summary" ;;
+        deep)    echo "deep"    ;;
+        *)       echo "overview" ;;
+      esac
+    timeout: 5000
+
+  # Extract the repo name for use as the output subfolder.
+  # Output: a single safe directory name, e.g. "Archon" or "my-project"
+  - id: setup
+    bash: |
+      REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+      REPO_NAME=$(basename "$REPO_ROOT")
+      # Sanitize: collapse whitespace/slashes to hyphens, keep alphanumerics + dots + hyphens
+      REPO_NAME=$(printf '%s' "$REPO_NAME" | tr ' /' '--' | tr -cd 'a-zA-Z0-9._-')
+      # Fallback if sanitization produced empty string
+      [ -z "$REPO_NAME" ] && REPO_NAME="unknown-repo"
+      mkdir -p "repo-deep-dive/$REPO_NAME"
+      echo "$REPO_NAME"
+    timeout: 10000
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 2: SUMMARY (always runs)
+  # One focused paragraph — what it is, what problem it solves, how
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: write-summary
+    depends_on: [scan, classify-depth, setup]
+    context: fresh
+    prompt: |
+      You are generating codebase documentation. Your task is the SUMMARY level.
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+      The directory already exists.
+
+      ## Instructions
+
+      1. Read up to 5 key source files to sharpen your understanding (entry points,
+         core module, main interface — use the scan output to guide your choices).
+
+      2. Write ONE paragraph of 4–7 sentences that captures:
+         - What this project IS (library, CLI, web app, API, platform, ML model, ...)
+         - What problem it solves and for whom
+         - Its primary technical approach or architecture (one sentence)
+         - What makes it notable or distinct
+
+      Use the real project name. Be concrete — use actual tech names, file names, and terms
+      from the README and source. No vague generalizations.
+
+      3. Write the paragraph to `repo-deep-dive/$setup.output/summary.md`:
+         ```markdown
+         # {Project Name}: Summary
+
+         {your paragraph}
+         ```
+
+      4. Print the paragraph to stdout (just the paragraph text, no heading).
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 3: OVERVIEW (overview + deep only)
+  # Capabilities, architecture, public surface, integration guide
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: write-overview
+    depends_on: [write-summary]
+    when: "$classify-depth.output == 'overview' || $classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are generating codebase documentation. Your task is the OVERVIEW level.
+
+      ## Summary (already written)
+
+      $write-summary.output
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      Explore the codebase thoroughly — read entry points, core modules, config files,
+      tests, and CI. Aim for 20–40 file reads before writing.
+
+      Write `repo-deep-dive/$setup.output/overview.md` with these sections:
+
+      ---
+
+      ### What It Does
+      A capabilities list: the complete set of things this project can do, with
+      concrete examples of each capability.
+
+      ### Architecture
+      How it's built: key packages or modules, layer boundaries, and data flow.
+      Include an ASCII/text diagram if the structure is non-trivial.
+
+      ### Public Surface
+      Everything an external consumer would interact with:
+      - **HTTP/gRPC/GraphQL API** — method, path/procedure, purpose (table format)
+      - **SDK / Library exports** — key functions, classes, types
+      - **CLI commands and flags** — with syntax examples
+      - **Events, webhooks, streaming** — event types, delivery model
+      - **Configuration** — every env var and config key, type, default, purpose
+
+      ### Integration Guide
+      How to embed this project into a larger automation system:
+      - Prerequisites and setup (exact commands)
+      - Authentication / credential configuration
+      - 3–5 integration patterns with minimal working code snippets
+      - Extension points: plugins, hooks, adapters, custom backends
+      - Known limitations and constraints
+
+      ### Operational Notes
+      Deployment model (single binary, Docker, k8s, ...), observability
+      (what's logged, what's metriced), resource requirements, data persistence.
+
+      ---
+
+      Be specific — use real class names, function names, file paths, and port numbers
+      from the codebase. No placeholders or vague descriptions.
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 4: DEEP — PARALLEL ANALYSIS (deep only)
+  # Four independent agents, each focused on one dimension.
+  # All run concurrently after write-overview completes.
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: deep-architecture
+    depends_on: [write-overview]
+    when: "$classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are generating codebase documentation — MODULE ARCHITECTURE section.
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      Produce `repo-deep-dive/$setup.output/deep/architecture.md`.
+      Create the directory first: `mkdir -p repo-deep-dive/$setup.output/deep`
+
+      Read every package/module directory. Read index files, core abstractions,
+      and interfaces. Aim for thorough coverage before writing.
+
+      Include these sections:
+
+      ### Module Map
+      Every package or module: its name, single-sentence purpose, key exports,
+      and its dependencies on other modules in this repo. Table or structured list.
+
+      ### Key Abstractions
+      The 5–10 most important interfaces, types, or base classes. For each:
+      - Name and file:line location
+      - What it represents in the domain
+      - Who implements it and who uses it
+
+      ### Data Flow
+      How data moves end-to-end for the top 2–3 primary use cases. Trace from
+      input (user action, HTTP request, CLI flag, webhook) to output (response,
+      file written, side effect). Cite the actual functions/methods at each step.
+
+      ### Dependency Graph
+      Top-level package dependency diagram (text/ASCII art).
+      Flag any circular dependencies.
+
+      ### Notable Architectural Decisions
+      Design choices that are non-obvious and affect how you'd extend or modify
+      the system (e.g., event-driven, actor model, CQRS, monorepo with workspaces,
+      dependency injection). Cite evidence from code or comments.
+
+      Cite file:line for all claims. No speculation.
+
+  - id: deep-api
+    depends_on: [write-overview]
+    when: "$classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are generating codebase documentation — API REFERENCE section.
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      Produce `repo-deep-dive/$setup.output/deep/api-reference.md`.
+      Create the directory first: `mkdir -p repo-deep-dive/$setup.output/deep`
+
+      Read all route/handler/controller/schema files. Read any OpenAPI, AsyncAPI,
+      or GraphQL schema files if present. Be exhaustive.
+
+      Include these sections (skip any that don't apply):
+
+      ### REST / HTTP API
+      For each endpoint:
+      | Method | Path | Purpose | Auth | Request Body | Response |
+      |--------|------|---------|------|--------------|----------|
+      Then a detailed entry for non-trivial endpoints with request/response schemas.
+
+      ### SDK / Library API
+      Public functions, classes, and types exported for external consumers.
+      For each: signature, purpose, parameters (name, type, description), return type, example.
+
+      ### CLI Interface
+      All commands and subcommands with flags. For each: syntax, description, examples.
+
+      ### Events / Webhooks / Streaming
+      Event names, payload schemas, delivery guarantees, subscription/listener patterns.
+
+      ### Authentication & Authorization
+      All supported auth mechanisms, how to configure each, token format and lifetime,
+      scope model if applicable.
+
+      ### Error Reference
+      Error response format, catalogue of error codes/types, recommended recovery strategies.
+
+      Cite file:line for every endpoint, export, and event type. If an endpoint exists,
+      document it — do not summarize away the details.
+
+  - id: deep-developer
+    depends_on: [write-overview]
+    when: "$classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are generating codebase documentation — DEVELOPER GUIDE section.
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      Produce `repo-deep-dive/$setup.output/deep/developer-guide.md`.
+      Create the directory first: `mkdir -p repo-deep-dive/$setup.output/deep`
+
+      Read build files, test files, CI config, and any CONTRIBUTING or DEVELOPMENT
+      docs. Check for Makefile, scripts/, Taskfile, justfile, etc.
+
+      Include these sections:
+
+      ### Prerequisites
+      Exact runtime versions, system dependencies, required CLI tools, and how
+      to install them. Be version-specific where it matters.
+
+      ### Setup: Zero to Running
+      Step-by-step commands from a clean machine to a running local instance.
+      Include expected output for non-obvious steps. Flag any known platform quirks.
+
+      ### Development Workflow
+      How to start the dev server/watcher, hot reload behavior, port defaults,
+      log level options, and the most common day-to-day commands.
+
+      ### Testing
+      Test framework(s) used, how to run the full suite, a single file, or watch
+      mode. How tests are organized, mocking strategy, coverage requirements,
+      and any test isolation quirks (e.g., process-level globals, module pollution).
+
+      ### Build & Packaging
+      Build commands, output artifacts, binary targets, Docker build, and how
+      the build feeds into CI or a release process.
+
+      ### Configuration Reference
+      Complete table of every env var and config file key: name, type, default,
+      required/optional, and purpose. Group by concern (server, database, auth, ...).
+
+      ### Contributing Conventions
+      Branch naming, commit message style, PR process, code style enforcement tools.
+
+      ### Common Failure Modes
+      The top 5–8 failure modes a new developer will hit and how to diagnose/fix each.
+
+  - id: deep-integration
+    depends_on: [write-overview]
+    when: "$classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are generating codebase documentation — INTEGRATION & EXTENSION GUIDE.
+
+      ## Repo Scan
+
+      $scan.output
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      Produce `repo-deep-dive/$setup.output/deep/integration-guide.md`.
+      Create the directory first: `mkdir -p repo-deep-dive/$setup.output/deep`
+
+      Read adapter files, plugin interfaces, hook systems, config loading, and
+      any existing integration examples or docs.
+
+      Write for someone building a "God-mode" automation dashboard that orchestrates
+      multiple AI coding projects running in parallel. Include these sections:
+
+      ### Integration Patterns
+      The canonical ways to use this project from external code:
+      - **As a service** (REST/gRPC/events) — when to use, setup, working example
+      - **As a library** (direct import) — when to use, setup, working example
+      - **As a CLI subprocess** — when to use, invocation pattern, output parsing
+      - **As a platform adapter** (if the project has an adapter interface) — how to implement
+      For each pattern: minimal working code snippet, caveats, performance considerations.
+
+      ### Extension Points
+      Every designed extension surface in the codebase:
+      - Plugin interfaces and adapter interfaces (file:line, method signatures)
+      - Hook systems (pre/post hooks, middleware, callbacks)
+      - Configuration overrides and custom backends
+      - Custom providers (storage, AI, auth, ...)
+      For each: interface definition (file:line), how to implement, complete example.
+
+      ### Automation Use Cases
+      Concrete recipes for automating this project's capabilities:
+      - Batch / bulk operations
+      - Scheduled / cron workflows
+      - Event-driven triggers (respond to webhooks, file changes, ...)
+      - Multi-repo or multi-project parallel execution
+      Include pseudo-code or real code for each recipe.
+
+      ### Parallel Deployment
+      How to run multiple instances without resource conflict:
+      - Port and network configuration
+      - Database or state isolation strategies
+      - Credential and secret management
+      - Shared vs. isolated filesystem resources
+      - Any concurrency or rate-limit constraints to plan around
+
+      ### Limitations & Gotchas
+      Known constraints that affect integration: concurrency limits, state assumptions,
+      failure modes under load, resource contention, non-obvious behaviors that will
+      surprise an integrator.
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 5: DEEP SYNTHESIS (deep only)
+  # Reads all four deep docs, cross-links them, writes the index
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: deep-synthesis
+    depends_on: [deep-architecture, deep-api, deep-developer, deep-integration]
+    trigger_rule: all_done
+    when: "$classify-depth.output == 'deep'"
+    context: fresh
+    prompt: |
+      You are completing the deep codebase documentation by writing the master index.
+
+      ## Output Path
+
+      All output files for this run go under: `repo-deep-dive/$setup.output/`
+
+      ## Instructions
+
+      1. Read all four deep analysis documents:
+         - `repo-deep-dive/$setup.output/deep/architecture.md`
+         - `repo-deep-dive/$setup.output/deep/api-reference.md`
+         - `repo-deep-dive/$setup.output/deep/developer-guide.md`
+         - `repo-deep-dive/$setup.output/deep/integration-guide.md`
+         Also read `repo-deep-dive/$setup.output/summary.md` and
+         `repo-deep-dive/$setup.output/overview.md`.
+
+      2. Write `repo-deep-dive/$setup.output/deep/index.md` — the ReadTheDocs master index:
+
+         ```markdown
+         # {Project Name} — Deep Reference
+
+         > {One-sentence tagline}
+
+         **Generated by**: repo-deep-dive workflow
+         **Date**: {today's date}
+         **Depth**: deep
+
+         ---
+
+         ## Documentation Map
+
+         | Document | What It Covers |
+         |----------|----------------|
+         | [Overview](../overview.md) | Capabilities, architecture, integration guide |
+         | [Architecture](architecture.md) | Module map, key abstractions, data flow |
+         | [API Reference](api-reference.md) | Endpoints, SDK, CLI, events, auth, errors |
+         | [Developer Guide](developer-guide.md) | Setup, testing, build, configuration |
+         | [Integration Guide](integration-guide.md) | Patterns, extension points, automation |
+
+         ---
+
+         ## Quick Start
+
+         {The 3–5 commands to go from zero to running, extracted from developer-guide}
+
+         ---
+
+         ## Key Concepts
+
+         {5–7 concepts a reader must understand before the rest makes sense.
+          Each with a 1–2 sentence definition and a link to where it's documented in depth.}
+
+         ---
+
+         ## Common Tasks
+
+         | I want to... | See... |
+         |--------------|--------|
+         | Set up locally | [Developer Guide → Setup](developer-guide.md#setup-zero-to-running) |
+         | Understand the architecture | [Architecture → Module Map](architecture.md#module-map) |
+         | Call the API | [API Reference](api-reference.md) |
+         | Extend the system | [Integration Guide → Extension Points](integration-guide.md#extension-points) |
+         | Run tests | [Developer Guide → Testing](developer-guide.md#testing) |
+         | Deploy in parallel | [Integration Guide → Parallel Deployment](integration-guide.md#parallel-deployment) |
+         {add 3–5 more rows relevant to this specific project}
+
+         ---
+
+         ## Cross-Cutting Notes
+
+         {Any inconsistencies, gaps, or open questions found across the four analyses.
+          List anything a new integrator should know that isn't obvious from a single doc.
+          Flag any sections that were thin due to limited source material.}
+         ```
+
+      3. Add YAML front-matter to each of the four deep/*.md files (read each, prepend the block):
+         ```yaml
+         ---
+         generated_by: repo-deep-dive workflow
+         date: {today's date}
+         depth: deep
+         ---
+         ```
+         Use the Edit tool to prepend this block to each file.
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 6: REPORT (always runs, waits for everything to settle)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: report
+    depends_on: [write-summary, write-overview, deep-synthesis]
+    trigger_rule: all_done
+    bash: |
+      REPO=$setup.output
+      DEPTH=$classify-depth.output
+      OUT_DIR="repo-deep-dive/$REPO"
+
+      echo "╔══════════════════════════════════════════════╗"
+      echo "║        repo-deep-dive — complete             ║"
+      echo "╚══════════════════════════════════════════════╝"
+      echo ""
+      echo "Repo:  $REPO"
+      echo "Depth: $DEPTH"
+      echo "Output: $OUT_DIR"
+      echo ""
+      if [ -d "$OUT_DIR" ]; then
+        echo "Files created:"
+        find "$OUT_DIR" -type f | sort | while read -r f; do
+          LINES=$(wc -l < "$f" 2>/dev/null || echo '?')
+          printf "  %-60s %5s lines\n" "$f" "$LINES"
+        done
+        echo ""
+        TOTAL=$(find "$OUT_DIR" -type f | wc -l)
+        echo "Total: $TOTAL file(s) in $OUT_DIR"
+      else
+        echo "Warning: output directory $OUT_DIR not found."
+      fi
+    timeout: 10000
