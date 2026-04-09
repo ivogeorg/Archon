@@ -3,8 +3,10 @@ description: |
   Use when: User wants to understand, document, or analyze a codebase.
   Triggers: "repo deep dive", "understand this repo", "document codebase", "repo-deep-dive",
             "analyze codebase", "comprehend repo", "summarize codebase", "document this repo".
-  Input: Optional depth as $1: summary | overview | deep (default: overview).
-         Optional repo URL as $1 (depth then becomes $2): not yet implemented.
+  Input: $1 (optional) depth: summary | overview | deep (default: overview).
+         $2 (optional) skip flag: skip-existing — skips regenerating artifacts that already
+             exist on disk. Useful when running a deeper level on a repo you've already
+             partially documented and the repo hasn't changed.
   Does: Scans the repo structure then generates documentation at the chosen depth level:
         summary  — one-paragraph distillation of purpose and function.
         overview — capabilities, architecture, integration points, and public contact surfaces.
@@ -18,7 +20,9 @@ model: sonnet
 
 nodes:
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 1: SCAN + CLASSIFY + SETUP (all parallel, no dependencies)
+  # PHASE 1: SCAN + CLASSIFY + SETUP
+  # scan/classify-depth/classify-skip/setup run in parallel.
+  # check-existing waits for setup + classify-skip, then runs.
   # ═══════════════════════════════════════════════════════════════
 
   - id: scan
@@ -103,6 +107,12 @@ nodes:
       esac
     timeout: 5000
 
+  # Normalize skip flag: "skip" if $2 == "skip-existing", else "overwrite"
+  - id: classify-skip
+    bash: |
+      if [ "$2" = "skip-existing" ]; then echo "skip"; else echo "overwrite"; fi
+    timeout: 5000
+
   # Extract the repo name for use as the output subfolder.
   # Output: a single safe directory name, e.g. "Archon" or "my-project"
   - id: setup
@@ -117,13 +127,30 @@ nodes:
       echo "$REPO_NAME"
     timeout: 10000
 
+  # Determine which artifacts to (re)generate.
+  # Outputs JSON: {"summary":"run|skip","overview":"run|skip"}
+  # A file is skipped only when skip-existing is requested AND the file already exists.
+  - id: check-existing
+    depends_on: [setup, classify-skip]
+    bash: |
+      REPO=$setup.output
+      SUMMARY_ACTION=run
+      OVERVIEW_ACTION=run
+      if [ "$classify-skip.output" = "skip" ]; then
+        [ -f "repo-deep-dive/$REPO/summary.md"  ] && SUMMARY_ACTION=skip
+        [ -f "repo-deep-dive/$REPO/overview.md" ] && OVERVIEW_ACTION=skip
+      fi
+      printf '{"summary":"%s","overview":"%s"}' "$SUMMARY_ACTION" "$OVERVIEW_ACTION"
+    timeout: 5000
+
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 2: SUMMARY (always runs)
+  # PHASE 2: SUMMARY (skipped if file exists and skip-existing set)
   # One focused paragraph — what it is, what problem it solves, how
   # ═══════════════════════════════════════════════════════════════
 
   - id: write-summary
-    depends_on: [scan, classify-depth, setup]
+    depends_on: [scan, check-existing]
+    when: "$check-existing.output.summary == 'run'"
     context: fresh
     prompt: |
       You are generating codebase documentation. Your task is the SUMMARY level.
@@ -167,7 +194,8 @@ nodes:
 
   - id: write-overview
     depends_on: [write-summary]
-    when: "$classify-depth.output == 'overview' || $classify-depth.output == 'deep'"
+    trigger_rule: all_done
+    when: "$check-existing.output.overview == 'run' && $classify-depth.output == 'overview' || $check-existing.output.overview == 'run' && $classify-depth.output == 'deep'"
     context: fresh
     prompt: |
       You are generating codebase documentation. Your task is the OVERVIEW level.
@@ -234,6 +262,7 @@ nodes:
 
   - id: deep-architecture
     depends_on: [write-overview]
+    trigger_rule: all_done
     when: "$classify-depth.output == 'deep'"
     context: fresh
     prompt: |
@@ -285,6 +314,7 @@ nodes:
 
   - id: deep-api
     depends_on: [write-overview]
+    trigger_rule: all_done
     when: "$classify-depth.output == 'deep'"
     context: fresh
     prompt: |
@@ -336,6 +366,7 @@ nodes:
 
   - id: deep-developer
     depends_on: [write-overview]
+    trigger_rule: all_done
     when: "$classify-depth.output == 'deep'"
     context: fresh
     prompt: |
@@ -392,6 +423,7 @@ nodes:
 
   - id: deep-integration
     depends_on: [write-overview]
+    trigger_rule: all_done
     when: "$classify-depth.output == 'deep'"
     context: fresh
     prompt: |
