@@ -134,9 +134,10 @@ nodes:
     depends_on: [setup, classify-skip]
     bash: |
       REPO=$setup.output
+      SKIP=$classify-skip.output
       SUMMARY_ACTION=run
       OVERVIEW_ACTION=run
-      if [ "$classify-skip.output" = "skip" ]; then
+      if [ "$SKIP" = "skip" ]; then
         [ -f "repo-deep-dive/$REPO/summary.md"  ] && SUMMARY_ACTION=skip
         [ -f "repo-deep-dive/$REPO/overview.md" ] && OVERVIEW_ACTION=skip
       fi
