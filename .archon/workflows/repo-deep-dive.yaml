@@ -97,9 +97,12 @@ nodes:
     timeout: 30000
 
   # Normalize depth: "summary" | "overview" | "deep" (default: overview)
+  # $ARGUMENTS is substituted with the full user message before bash runs;
+  # cut extracts the first whitespace-separated word.
   - id: classify-depth
     bash: |
-      DEPTH_ARG="$1"
+      ARGS="$ARGUMENTS"
+      DEPTH_ARG=$(echo "$ARGS" | cut -d' ' -f1)
       case "$DEPTH_ARG" in
         summary) echo "summary" ;;
         deep)    echo "deep"    ;;
@@ -107,10 +110,12 @@ nodes:
       esac
     timeout: 5000
 
-  # Normalize skip flag: "skip" if $2 == "skip-existing", else "overwrite"
+  # Normalize skip flag: "skip" if second word == "skip-existing", else "overwrite"
   - id: classify-skip
     bash: |
-      if [ "$2" = "skip-existing" ]; then echo "skip"; else echo "overwrite"; fi
+      ARGS="$ARGUMENTS"
+      SKIP_ARG=$(echo "$ARGS" | cut -d' ' -f2)
+      if [ "$SKIP_ARG" = "skip-existing" ]; then echo "skip"; else echo "overwrite"; fi
     timeout: 5000
 
   # Extract the repo name for use as the output subfolder.
