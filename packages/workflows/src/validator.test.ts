@@ -2,6 +2,12 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtemp, mkdir, writeFile, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { registerBuiltinProviders, clearRegistry } from '@archon/providers';
+
+// Bootstrap provider registry (needed by capability-driven warnings in validator)
+clearRegistry();
+registerBuiltinProviders();
+
 import {
   levenshtein,
   findSimilar,
@@ -25,11 +31,7 @@ afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true });
 });
 
-function makeWorkflow(
-  name: string,
-  nodes: DagNode[],
-  provider?: 'claude' | 'codex'
-): WorkflowDefinition {
+function makeWorkflow(name: string, nodes: DagNode[], provider?: string): WorkflowDefinition {
   return {
     name,
     description: 'test workflow',
@@ -221,7 +223,7 @@ describe('validateWorkflowResources — MCP validation', () => {
     const issues = await validateWorkflowResources(workflow, tmpDir);
     const mcpWarnings = issues.filter(i => i.field === 'mcp' && i.level === 'warning');
     expect(mcpWarnings).toHaveLength(1);
-    expect(mcpWarnings[0].message).toContain('Claude-only');
+    expect(mcpWarnings[0].message).toContain('not supported by provider');
   });
 });
 
@@ -287,5 +289,58 @@ describe('discoverAvailableCommands', () => {
     const withDefaults = await discoverAvailableCommands(tmpDir, { loadDefaultCommands: true });
     const without = await discoverAvailableCommands(tmpDir, { loadDefaultCommands: false });
     expect(withDefaults.length).toBeGreaterThanOrEqual(without.length);
+  });
+});
+
+// =============================================================================
+// validateWorkflowResources — script nodes
+// =============================================================================
+
+describe('validateWorkflowResources — script nodes', () => {
+  test('error when named bun script file does not exist', async () => {
+    const workflow = makeWorkflow('test', [
+      { id: 'step1', script: 'nonexistent-script', runtime: 'bun' } as unknown as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir);
+    const errors = issues.filter(i => i.level === 'error' && i.field === 'script');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain("Named script 'nonexistent-script' not found");
+    expect(errors[0].nodeId).toBe('step1');
+  });
+
+  test('error when named uv script file does not exist', async () => {
+    const workflow = makeWorkflow('test', [
+      { id: 'step1', script: 'missing-py-script', runtime: 'uv' } as unknown as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir);
+    const errors = issues.filter(i => i.level === 'error' && i.field === 'script');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain("Named script 'missing-py-script' not found");
+    expect(errors[0].hint).toContain('.py');
+  });
+
+  test('no error when named bun script file exists', async () => {
+    const scriptsDir = join(tmpDir, '.archon', 'scripts');
+    await mkdir(scriptsDir, { recursive: true });
+    await writeFile(join(scriptsDir, 'my-script.ts'), 'console.log("hi")');
+    const workflow = makeWorkflow('test', [
+      { id: 'step1', script: 'my-script', runtime: 'bun' } as unknown as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir);
+    const scriptErrors = issues.filter(i => i.level === 'error' && i.field === 'script');
+    expect(scriptErrors).toHaveLength(0);
+  });
+
+  test('no error for inline bun script (no file lookup needed)', async () => {
+    const workflow = makeWorkflow('test', [
+      {
+        id: 'step1',
+        script: 'console.log("inline")',
+        runtime: 'bun',
+      } as unknown as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir);
+    const scriptErrors = issues.filter(i => i.level === 'error' && i.field === 'script');
+    expect(scriptErrors).toHaveLength(0);
   });
 });

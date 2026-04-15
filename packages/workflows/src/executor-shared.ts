@@ -67,13 +67,8 @@ export function matchesPattern(message: string, patterns: string[]): boolean {
  * Classify an error to determine if it's transient (can retry) or fatal (should fail).
  * FATAL patterns take priority over TRANSIENT patterns to prevent an error message
  * containing both (e.g. "unauthorized: process exited with code 1") from being retried.
- *
- * First-party named error types are checked by name (immune to message rewording).
  */
 export function classifyError(error: Error): ErrorType {
-  // Named first-party errors checked by name — immune to message rewording
-  if (error.name === 'EnvLeakError') return 'FATAL';
-
   const message = error.message.toLowerCase();
 
   if (matchesPattern(message, FATAL_PATTERNS)) {
@@ -401,4 +396,13 @@ export function detectCompletionSignal(output: string, signal: string): boolean 
 /** Strip internal completion signal tags before sending to user-facing output. */
 export function stripCompletionTags(content: string): string {
   return content.replace(/<promise>[\s\S]*?<\/promise>/gi, '').trim();
+}
+
+/**
+ * Determine whether a script string is "inline" code or a named script reference.
+ * A named script is a simple identifier (no newlines, no whitespace, no shell metacharacters).
+ * Used by both the DAG executor (runtime dispatch) and the validator (resource checks).
+ */
+export function isInlineScript(script: string): boolean {
+  return script.includes('\n') || /[;(){}&|<>$`"' ]/.test(script);
 }

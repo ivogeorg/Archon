@@ -62,10 +62,10 @@ export interface WorkflowRunOptions {
   noWorktree?: boolean;
   resume?: boolean;
   codebaseId?: string; // Passed by resume/approve to skip path-based lookup
-  /** When true, skip the env-leak-gate during auto-registration. */
-  allowEnvKeys?: boolean;
   quiet?: boolean;
   verbose?: boolean;
+  /** Platform conversation ID (e.g. `cli-{ts}-{rand}`), NOT a DB UUID. */
+  conversationId?: string;
 }
 
 /**
@@ -269,7 +269,7 @@ export async function workflowRunCommand(
   const adapter = new CLIAdapter();
 
   // Generate conversation ID
-  const conversationId = generateConversationId();
+  const conversationId = options.conversationId ?? generateConversationId();
 
   // Get or create conversation in database
   let conversation;
@@ -323,7 +323,7 @@ export async function workflowRunCommand(
     const repoRoot = await git.findRepoRoot(cwd);
     if (repoRoot) {
       try {
-        const result = await registerRepository(repoRoot, options.allowEnvKeys, 'register-cli');
+        const result = await registerRepository(repoRoot);
         codebase = await codebaseDb.getCodebase(result.codebaseId);
         if (!result.alreadyExisted) {
           getLog().info({ name: result.name }, 'cli.codebase_auto_registered');
@@ -861,10 +861,30 @@ export async function workflowApproveCommand(runId: string, comment?: string): P
   console.log('');
   console.log('Resuming workflow...');
 
+  // Look up the original platform conversation ID to keep all messages in one thread
+  let platformConversationId: string | undefined;
+  try {
+    const originalConversation = await conversationDb.getConversationById(result.conversationId);
+    platformConversationId = originalConversation?.platform_conversation_id ?? undefined;
+    if (!originalConversation) {
+      getLog().info(
+        { runId, conversationId: result.conversationId },
+        'cli.workflow_approve_conversation_not_found'
+      );
+    }
+  } catch (error) {
+    const err = error as Error;
+    getLog().warn(
+      { err, runId, conversationId: result.conversationId },
+      'cli.workflow_approve_conversation_lookup_failed'
+    );
+  }
+
   try {
     await workflowRunCommand(result.workingPath, result.workflowName, result.userMessage ?? '', {
       resume: true,
       codebaseId: result.codebaseId ?? undefined,
+      conversationId: platformConversationId,
     });
   } catch (error) {
     const err = error as Error;
@@ -900,10 +920,31 @@ export async function workflowRejectCommand(runId: string, reason?: string): Pro
   }
   console.log(`Rejected workflow: ${result.workflowName}`);
   console.log('Resuming with on_reject prompt...');
+
+  // Look up the original platform conversation ID to keep all messages in one thread
+  let platformConversationId: string | undefined;
+  try {
+    const originalConversation = await conversationDb.getConversationById(result.conversationId);
+    platformConversationId = originalConversation?.platform_conversation_id ?? undefined;
+    if (!originalConversation) {
+      getLog().info(
+        { runId, conversationId: result.conversationId },
+        'cli.workflow_reject_conversation_not_found'
+      );
+    }
+  } catch (error) {
+    const err = error as Error;
+    getLog().warn(
+      { err, runId, conversationId: result.conversationId },
+      'cli.workflow_reject_conversation_lookup_failed'
+    );
+  }
+
   try {
     await workflowRunCommand(result.workingPath, result.workflowName, result.userMessage ?? '', {
       resume: true,
       codebaseId: result.codebaseId ?? undefined,
+      conversationId: platformConversationId,
     });
   } catch (error) {
     const err = error as Error;

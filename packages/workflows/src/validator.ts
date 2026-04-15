@@ -13,13 +13,27 @@ import { join, resolve, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { access, readFile } from 'fs/promises';
 import {
+  createLogger,
   getCommandFolderSearchPaths,
   getDefaultCommandsPath,
   findMarkdownFilesRecursive,
 } from '@archon/paths';
+import { execFileAsync } from '@archon/git';
 import { BUNDLED_COMMANDS, isBinaryBuild } from './defaults/bundled-defaults';
 import { isValidCommandName } from './command-validation';
+import { getProviderCapabilities, isRegisteredProvider } from '@archon/providers';
+
+/** Lazy-initialized logger */
+let cachedLog: ReturnType<typeof createLogger> | undefined;
+function getLog(): ReturnType<typeof createLogger> {
+  if (!cachedLog) cachedLog = createLogger('workflow.validator');
+  return cachedLog;
+}
+import { isScriptNode } from './schemas';
 import type { WorkflowDefinition, DagNode } from './schemas';
+import type { ScriptRuntime } from './script-discovery';
+import { discoverScripts } from './script-discovery';
+import { isInlineScript } from './executor-shared';
 
 // =============================================================================
 // Types
@@ -193,13 +207,52 @@ async function resolveCommand(
 }
 
 // =============================================================================
+// Runtime availability checking
+// =============================================================================
+
+/** Installation hints per runtime */
+const RUNTIME_INSTALL_HINTS: Record<ScriptRuntime, string> = {
+  bun: 'Install bun: https://bun.sh — or run: curl -fsSL https://bun.sh/install | bash',
+  uv: 'Install uv: https://docs.astral.sh/uv/getting-started/installation/ — or run: curl -LsSf https://astral.sh/uv/install.sh | sh',
+};
+
+const runtimeCache = new Map<string, boolean>();
+
+/** Clear the runtime availability cache (exposed for testing). */
+export function clearRuntimeCache(): void {
+  runtimeCache.clear();
+}
+
+/**
+ * Check whether a runtime binary (bun or uv) is available on PATH.
+ * Results are memoized per runtime name to avoid repeated subprocess spawns.
+ */
+export async function checkRuntimeAvailable(runtime: ScriptRuntime): Promise<boolean> {
+  const cached = runtimeCache.get(runtime);
+  if (cached !== undefined) return cached;
+  try {
+    await execFileAsync('which', [runtime]);
+    runtimeCache.set(runtime, true);
+    return true;
+  } catch {
+    runtimeCache.set(runtime, false);
+    return false;
+  }
+}
+
+// =============================================================================
 // Workflow resource validation (Level 3)
 // =============================================================================
 
-/** Get the resolved provider for a node (node-level > workflow-level) */
-function resolveProvider(node: DagNode, workflowProvider?: string): string {
+/** Get the resolved provider for a node (node-level > workflow-level > config default).
+ *  Returns undefined only when no provider is set at any level. */
+function resolveProvider(
+  node: DagNode,
+  workflowProvider?: string,
+  defaultProvider?: string
+): string | undefined {
   if ('provider' in node && node.provider) return node.provider;
-  return workflowProvider ?? 'claude';
+  return workflowProvider ?? defaultProvider;
 }
 
 /**
@@ -211,13 +264,14 @@ function resolveProvider(node: DagNode, workflowProvider?: string): string {
 export async function validateWorkflowResources(
   workflow: WorkflowDefinition,
   cwd: string,
-  config?: ValidationConfig
+  config?: ValidationConfig,
+  defaultProvider?: string
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
   const availableCommands = await discoverAvailableCommands(cwd, config);
 
   for (const node of workflow.nodes) {
-    const provider = resolveProvider(node, workflow.provider);
+    const provider = resolveProvider(node, workflow.provider, defaultProvider);
 
     // --- Command nodes: check file exists ---
     if ('command' in node && typeof node.command === 'string') {
@@ -288,15 +342,18 @@ export async function validateWorkflowResources(
         }
       }
 
-      // Warn if using MCP with Codex
-      if (provider === 'codex') {
-        issues.push({
-          level: 'warning',
-          nodeId: node.id,
-          field: 'mcp',
-          message: 'MCP servers are Claude-only per-node — this will be ignored on Codex',
-          hint: 'For Codex, configure MCP servers globally in ~/.codex/config.toml instead',
-        });
+      // Warn if using MCP with a provider that doesn't support it
+      if (provider && isRegisteredProvider(provider)) {
+        const caps = getProviderCapabilities(provider);
+        if (!caps.mcp) {
+          issues.push({
+            level: 'warning',
+            nodeId: node.id,
+            field: 'mcp',
+            message: `MCP servers are not supported by provider '${provider}' — this will be ignored`,
+            hint: 'Remove the mcp field or switch to a provider that supports MCP',
+          });
+        }
       }
     }
 
@@ -320,41 +377,95 @@ export async function validateWorkflowResources(
         }
       }
 
-      // Warn if using skills with Codex
-      if (provider === 'codex') {
-        issues.push({
-          level: 'warning',
-          nodeId: node.id,
-          field: 'skills',
-          message: 'Skills are Claude-only per-node — this will be ignored on Codex',
-          hint: 'For Codex, place skills in ~/.agents/skills/ for global discovery instead',
-        });
+      // Warn if using skills with a provider that doesn't support them
+      if (provider && isRegisteredProvider(provider)) {
+        const caps = getProviderCapabilities(provider);
+        if (!caps.skills) {
+          issues.push({
+            level: 'warning',
+            nodeId: node.id,
+            field: 'skills',
+            message: `Skills are not supported by provider '${provider}' — this will be ignored`,
+            hint: 'Remove the skills field or switch to a provider that supports skills',
+          });
+        }
       }
     }
 
-    // --- Hooks with Codex warning ---
-    if ('hooks' in node && node.hooks && provider === 'codex') {
-      issues.push({
-        level: 'warning',
-        nodeId: node.id,
-        field: 'hooks',
-        message: 'Hooks are Claude-only — this will be ignored on Codex',
-        hint: 'Hooks have no Codex equivalent. Remove them or switch to provider: claude',
-      });
-    }
+    // --- Capability-driven warnings for hooks and tool restrictions ---
+    if (provider && isRegisteredProvider(provider)) {
+      const caps = getProviderCapabilities(provider);
 
-    // --- Tool restrictions with Codex warning ---
-    if (provider === 'codex') {
-      if (
-        ('allowed_tools' in node && node.allowed_tools !== undefined) ||
-        ('denied_tools' in node && node.denied_tools !== undefined)
-      ) {
+      if ('hooks' in node && node.hooks && !caps.hooks) {
         issues.push({
           level: 'warning',
           nodeId: node.id,
-          field: 'allowed_tools/denied_tools',
-          message: 'Tool restrictions are Claude-only — this will be ignored on Codex',
-          hint: 'For Codex, configure tool restrictions per MCP server in ~/.codex/config.toml',
+          field: 'hooks',
+          message: `Hooks are not supported by provider '${provider}' — this will be ignored`,
+          hint: 'Remove the hooks field or switch to a provider that supports hooks',
+        });
+      }
+
+      if (!caps.toolRestrictions) {
+        if (
+          ('allowed_tools' in node && node.allowed_tools !== undefined) ||
+          ('denied_tools' in node && node.denied_tools !== undefined)
+        ) {
+          issues.push({
+            level: 'warning',
+            nodeId: node.id,
+            field: 'allowed_tools/denied_tools',
+            message: `Tool restrictions are not supported by provider '${provider}' — this will be ignored`,
+            hint: 'Remove tool restriction fields or switch to a provider that supports them',
+          });
+        }
+      }
+    }
+
+    // --- Script nodes: check named script file exists + runtime available ---
+    if (isScriptNode(node)) {
+      const script = node.script;
+
+      // Named script: validate file exists in .archon/scripts/
+      if (!isInlineScript(script)) {
+        const scriptsDir = resolve(cwd, '.archon', 'scripts');
+        const extensions = node.runtime === 'uv' ? ['.py'] : ['.ts', '.js'];
+        const existsResults = await Promise.all(
+          extensions.map(ext => fileExists(join(scriptsDir, `${script}${ext}`)))
+        );
+        const scriptExists = existsResults.some(Boolean);
+
+        if (!scriptExists) {
+          issues.push({
+            level: 'error',
+            nodeId: node.id,
+            field: 'script',
+            message: `Named script '${script}' not found in .archon/scripts/`,
+            hint: `Create .archon/scripts/${script}.${node.runtime === 'uv' ? 'py' : 'ts'} with your script code`,
+          });
+        }
+      }
+
+      // Runtime availability: warn if binary not on PATH
+      const runtimeAvailable = await checkRuntimeAvailable(node.runtime);
+      if (!runtimeAvailable) {
+        issues.push({
+          level: 'warning',
+          nodeId: node.id,
+          field: 'runtime',
+          message: `Runtime '${node.runtime}' is not available on PATH`,
+          hint: RUNTIME_INSTALL_HINTS[node.runtime],
+        });
+      }
+
+      // Warn when deps is specified with bun (bun auto-installs, deps is a no-op)
+      if (node.runtime === 'bun' && node.deps && node.deps.length > 0) {
+        issues.push({
+          level: 'warning',
+          nodeId: node.id,
+          field: 'deps',
+          message: "'deps' is ignored for bun runtime (bun auto-installs packages at runtime)",
+          hint: 'Remove deps or switch to runtime: uv if you need explicit dependency management',
         });
       }
     }
@@ -430,6 +541,87 @@ export async function validateCommand(
 
   return {
     commandName,
+    valid: issues.filter(i => i.level === 'error').length === 0,
+    issues,
+  };
+}
+
+// =============================================================================
+// Script validation
+// =============================================================================
+
+/** Result of validating a single script */
+export interface ScriptValidationResult {
+  scriptName: string;
+  valid: boolean;
+  issues: ValidationIssue[];
+}
+
+/**
+ * Discover all script names from .archon/scripts/ in the given cwd.
+ * Returns a list of { name, path, runtime } entries.
+ */
+export async function discoverAvailableScripts(
+  cwd: string
+): Promise<{ name: string; path: string; runtime: ScriptRuntime }[]> {
+  const scriptsDir = resolve(cwd, '.archon', 'scripts');
+  try {
+    const scripts = await discoverScripts(scriptsDir);
+    return [...scripts.values()].map(s => ({ name: s.name, path: s.path, runtime: s.runtime }));
+  } catch (error) {
+    const err = error as Error;
+    getLog().warn({ err, scriptsDir }, 'script_discovery_failed');
+    return [];
+  }
+}
+
+/**
+ * Validate a single named script: file exists and runtime is available.
+ */
+export async function validateScript(
+  scriptName: string,
+  cwd: string
+): Promise<ScriptValidationResult> {
+  const issues: ValidationIssue[] = [];
+  const scriptsDir = resolve(cwd, '.archon', 'scripts');
+
+  // Find the script file (any supported extension)
+  const allExtensions = ['.ts', '.js', '.py'];
+  let foundPath: string | null = null;
+  let detectedRuntime: ScriptRuntime | null = null;
+
+  for (const ext of allExtensions) {
+    const candidate = join(scriptsDir, `${scriptName}${ext}`);
+    if (await fileExists(candidate)) {
+      foundPath = candidate;
+      detectedRuntime = ext === '.py' ? 'uv' : 'bun';
+      break;
+    }
+  }
+
+  if (!foundPath || !detectedRuntime) {
+    issues.push({
+      level: 'error',
+      field: 'file',
+      message: `Script '${scriptName}' not found in .archon/scripts/`,
+      hint: `Create .archon/scripts/${scriptName}.ts (bun) or .archon/scripts/${scriptName}.py (uv)`,
+    });
+    return { scriptName, valid: false, issues };
+  }
+
+  // Check runtime availability
+  const runtimeAvailable = await checkRuntimeAvailable(detectedRuntime);
+  if (!runtimeAvailable) {
+    issues.push({
+      level: 'warning',
+      field: 'runtime',
+      message: `Runtime '${detectedRuntime}' is not available on PATH`,
+      hint: RUNTIME_INSTALL_HINTS[detectedRuntime],
+    });
+  }
+
+  return {
+    scriptName,
     valid: issues.filter(i => i.level === 'error').length === 0,
     issues,
   };
