@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { AgentSession, AgentSessionEvent } from '@mariozechner/pi-coding-agent';
+import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 
 import type { MessageChunk } from '../../types';
 import {
@@ -415,13 +415,24 @@ describe('tryParseStructuredOutput', () => {
     expect(tryParseStructuredOutput('```\n{"ok":1}\n```')).toEqual({ ok: 1 });
   });
 
-  test('parses JSON arrays', () => {
-    expect(tryParseStructuredOutput('[1,2,3]')).toEqual([1, 2, 3]);
+  test('rejects top-level JSON arrays (object-only contract)', () => {
+    // output_format is an object schema and the augmentation asks for an object;
+    // a top-level array is not valid structured output.
+    expect(tryParseStructuredOutput('[1,2,3]')).toBeUndefined();
   });
 
   test('returns undefined on empty string', () => {
     expect(tryParseStructuredOutput('')).toBeUndefined();
     expect(tryParseStructuredOutput('   ')).toBeUndefined();
+  });
+
+  test('returns undefined for valid JSON that is not an object', () => {
+    // Schema augmentation always asks for an object — bare primitives are
+    // valid JSON but not "structured output".
+    expect(tryParseStructuredOutput('null')).toBeUndefined();
+    expect(tryParseStructuredOutput('42')).toBeUndefined();
+    expect(tryParseStructuredOutput('"answer"')).toBeUndefined();
+    expect(tryParseStructuredOutput('true')).toBeUndefined();
   });
 
   test('returns undefined when model wraps JSON in prose with trailing text', () => {
@@ -481,9 +492,16 @@ describe('tryParseStructuredOutput', () => {
     expect(tryParseStructuredOutput(withExample)).toBeUndefined();
   });
 
-  test('returns undefined on malformed JSON', () => {
+  test('returns undefined on malformed JSON with no key/value structure', () => {
+    // No `:` → not object-shaped, so tier-3 repair is not attempted (stays undefined).
     expect(tryParseStructuredOutput('{not valid}')).toBeUndefined();
-    expect(tryParseStructuredOutput('{"unclosed":')).toBeUndefined();
+    expect(tryParseStructuredOutput('{"key" "value"}')).toBeUndefined();
+  });
+
+  test('tier 3 recovers a max_tokens-truncated object', () => {
+    // `{"unclosed":` is a token-capped tail; jsonrepair closes it with a null value.
+    // Wrong-but-object → the dag-executor's schema validation rejects it downstream.
+    expect(tryParseStructuredOutput('{"unclosed":')).toEqual({ unclosed: null });
   });
 
   test('preserves backticks inside JSON string values', () => {

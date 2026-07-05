@@ -143,4 +143,28 @@ export const marketplaceEntries: MarketplaceEntry[] = [
     tags: ['review', 'automation'],
     archonVersionCompat: '>=0.3.0',
   },
+  {
+    slug: 'piv-system-evolution',
+    name: 'PIV Loop + System Evolution',
+    author: 'coleam00',
+    description:
+      "Runs the PIV loop (Plan-Implement-Validate) on a feature or bug behind four human-in-the-loop gates, then evolves the codebase's own AI Layer from what the run learned. Eight phases are adapted from the agentic-coding-course AI Layer. Ends in a draft PR.",
+    sourceUrl:
+      'https://github.com/coleam00/piv-system-evolution/tree/de8a0e94f9bab1a81a152c62d5d5e4a2023874b3/.archon',
+    sha: 'de8a0e94f9bab1a81a152c62d5d5e4a2023874b3',
+    tags: ['development', 'planning', 'review'],
+    archonVersionCompat: '>=0.3.0',
+  },
+  {
+    slug: 'harness-score',
+    name: 'Harness Score',
+    author: 'seanrobertwright',
+    description:
+      'Audit a repository for AI-agent readiness. A deterministic script runs 10 checks (agent instructions, README, build/test commands, CI, tests, lint/typecheck, .archon workflows, security scanning, sensitive paths) and computes a score out of 100; Claude then narrates the pre-computed results into a markdown report with a rating and the top 3 fixes ranked by score gain.',
+    sourceUrl:
+      'https://github.com/seanrobertwright/archon-harness-score/blob/main/harness-score.yaml',
+    sha: '0a5b1406d9869e29507aed005df9456a2ea686e6',
+    tags: ['review', 'automation'],
+    archonVersionCompat: '>=0.3.0',
+  },
 ];

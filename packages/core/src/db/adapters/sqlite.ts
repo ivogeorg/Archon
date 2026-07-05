@@ -162,6 +162,35 @@ export class SqliteAdapter implements IDatabase {
    * the columns were added to createSchema().
    */
   private migrateColumns(): void {
+    // Users columns. `role` is the web-auth identity seam (default 'admin').
+    // Better Auth's own tables are PostgreSQL-only — web auth is never enabled
+    // on SQLite — so only the role column is backfilled here.
+    try {
+      const userCols = this.db.prepare("PRAGMA table_info('remote_agent_users')").all() as {
+        name: string;
+      }[];
+      const userColNames = new Set(userCols.map(c => c.name));
+      if (!userColNames.has('role')) {
+        this.db.run("ALTER TABLE remote_agent_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+      }
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_users_columns_failed');
+    }
+
+    // Codebases columns
+    try {
+      const codebaseCols = this.db.prepare("PRAGMA table_info('remote_agent_codebases')").all() as {
+        name: string;
+      }[];
+      const codebaseColNames = new Set(codebaseCols.map(c => c.name));
+
+      if (!codebaseColNames.has('default_branch')) {
+        this.db.run('ALTER TABLE remote_agent_codebases ADD COLUMN default_branch TEXT');
+      }
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_codebases_columns_failed');
+    }
+
     // Conversations columns
     try {
       const cols = this.db.prepare("PRAGMA table_info('remote_agent_conversations')").all() as {
@@ -178,6 +207,18 @@ export class SqliteAdapter implements IDatabase {
       if (!colNames.has('hidden')) {
         this.db.run('ALTER TABLE remote_agent_conversations ADD COLUMN hidden INTEGER DEFAULT 0');
       }
+      if (!colNames.has('user_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_conversations ADD COLUMN user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL'
+        );
+      }
+      // Index must be created here, not in createSchema(): the column doesn't
+      // exist on pre-0.4.0 databases until the ALTER TABLE above runs, and
+      // CREATE INDEX on a missing column aborts the entire createSchema()
+      // exec block. Idempotent so it's safe to run unconditionally.
+      this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON remote_agent_conversations(user_id) WHERE user_id IS NOT NULL'
+      );
     } catch (e: unknown) {
       getLog().warn({ err: e as Error }, 'db.sqlite_migration_conversations_columns_failed');
     }
@@ -198,6 +239,16 @@ export class SqliteAdapter implements IDatabase {
       if (!wfColNames.has('working_path')) {
         this.db.run('ALTER TABLE remote_agent_workflow_runs ADD COLUMN working_path TEXT');
       }
+
+      if (!wfColNames.has('user_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_workflow_runs ADD COLUMN user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL'
+        );
+      }
+      // Same rationale as idx_conversations_user_id above.
+      this.db.run(
+        'CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_id ON remote_agent_workflow_runs(user_id) WHERE user_id IS NOT NULL'
+      );
     } catch (e: unknown) {
       getLog().warn({ err: e as Error }, 'db.sqlite_migration_workflow_runs_columns_failed');
     }
@@ -215,6 +266,82 @@ export class SqliteAdapter implements IDatabase {
     } catch (e: unknown) {
       getLog().warn({ err: e as Error }, 'db.sqlite_migration_session_columns_failed');
     }
+
+    // Messages columns
+    try {
+      const cols = this.db.prepare("PRAGMA table_info('remote_agent_messages')").all() as {
+        name: string;
+      }[];
+      const colNames = new Set(cols.map(c => c.name));
+      if (!colNames.has('user_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_messages ADD COLUMN user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL'
+        );
+      }
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_messages_columns_failed');
+    }
+
+    // Isolation environments columns
+    try {
+      const cols = this.db
+        .prepare("PRAGMA table_info('remote_agent_isolation_environments')")
+        .all() as {
+        name: string;
+      }[];
+      const colNames = new Set(cols.map(c => c.name));
+      if (!colNames.has('created_by_user_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_isolation_environments ADD COLUMN created_by_user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL'
+        );
+      }
+    } catch (e: unknown) {
+      getLog().warn(
+        { err: e as Error },
+        'db.sqlite_migration_isolation_environments_columns_failed'
+      );
+    }
+
+    // #1955: credential rows are vendor-keyed (claude→anthropic, codex→openai,
+    // copilot→github-copilot). Idempotent data fix mirroring
+    // migrations/000_combined.sql: where both a legacy and a vendor row exist
+    // for the same user, the vendor row wins; then legacy rows are renamed.
+    // Transactional so a mid-sequence failure can't leave partial renames
+    // (matches the Postgres path, which runs inside the schema-apply txn);
+    // a failed run is also survivable — reads normalize legacy ids.
+    try {
+      this.db.run('BEGIN');
+      try {
+        this.db.run(
+          `DELETE FROM remote_agent_user_provider_keys
+           WHERE provider IN ('claude', 'codex', 'copilot')
+             AND EXISTS (
+               SELECT 1 FROM remote_agent_user_provider_keys v
+               WHERE v.user_id = remote_agent_user_provider_keys.user_id
+                 AND v.provider = CASE remote_agent_user_provider_keys.provider
+                   WHEN 'claude' THEN 'anthropic'
+                   WHEN 'codex' THEN 'openai'
+                   WHEN 'copilot' THEN 'github-copilot'
+                 END
+             )`
+        );
+        this.db.run(
+          "UPDATE remote_agent_user_provider_keys SET provider = 'anthropic' WHERE provider = 'claude'"
+        );
+        this.db.run(
+          "UPDATE remote_agent_user_provider_keys SET provider = 'openai' WHERE provider = 'codex'"
+        );
+        this.db.run(
+          "UPDATE remote_agent_user_provider_keys SET provider = 'github-copilot' WHERE provider = 'copilot'"
+        );
+        this.db.run('COMMIT');
+      } catch (inner: unknown) {
+        this.db.run('ROLLBACK');
+        throw inner;
+      }
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_provider_key_vendor_ids_failed');
+    }
   }
 
   /**
@@ -228,13 +355,81 @@ export class SqliteAdapter implements IDatabase {
    */
   private createSchema(): void {
     this.db.run(`
+      -- Users table (Archon identity, platform-agnostic)
+      CREATE TABLE IF NOT EXISTS remote_agent_users (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        display_name TEXT,
+        email TEXT,
+        role TEXT NOT NULL DEFAULT 'admin',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+
+      -- User identities table (per-platform mapping → users.id)
+      CREATE TABLE IF NOT EXISTS remote_agent_user_identities (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES remote_agent_users(id) ON DELETE CASCADE,
+        platform TEXT NOT NULL,
+        platform_user_id TEXT NOT NULL,
+        platform_display_name TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(platform, platform_user_id)
+      );
+
+      -- User GitHub tokens (per-user device-flow tokens, encrypted at rest) [PR-C]
+      CREATE TABLE IF NOT EXISTS remote_agent_user_github_tokens (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES remote_agent_users(id) ON DELETE CASCADE,
+        github_user_id INTEGER NOT NULL,
+        github_login TEXT NOT NULL,
+        access_token_encrypted TEXT NOT NULL,
+        refresh_token_encrypted TEXT,
+        access_token_expires_at TEXT,
+        refresh_token_expires_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(user_id)
+      );
+
+      -- User AI-provider credentials (Phase 2): one row per (user_id, provider).
+      -- Exactly one of api_key_encrypted / oauth_creds_encrypted is populated;
+      -- the kind column records which. Encrypted at rest with TOKEN_ENCRYPTION_KEY.
+      CREATE TABLE IF NOT EXISTS remote_agent_user_provider_keys (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES remote_agent_users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        api_key_encrypted TEXT,
+        oauth_creds_encrypted TEXT,
+        label TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(user_id, provider)
+      );
+
+      -- User AI preferences (Phase 3): personal model tiers, @custom aliases,
+      -- and default assistant. NON-encrypted — model names are not secrets
+      -- (mirrors codebase_env_vars, not the provider-key store). One row per
+      -- user; cascades on user deletion. tiers/aliases are JSON-as-TEXT (parsed
+      -- in the store layer so SQLite and Postgres behave identically).
+      CREATE TABLE IF NOT EXISTS remote_agent_user_ai_prefs (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES remote_agent_users(id) ON DELETE CASCADE,
+        tiers TEXT,
+        aliases TEXT,
+        default_provider TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(user_id)
+      );
+
       -- Codebases table
       CREATE TABLE IF NOT EXISTS remote_agent_codebases (
         id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
         name TEXT NOT NULL,
         repository_url TEXT,
         default_cwd TEXT NOT NULL,
-        default_branch TEXT DEFAULT 'main',
+        default_branch TEXT,
         ai_assistant_type TEXT DEFAULT 'claude',
         commands TEXT DEFAULT '{}',
         created_at TEXT DEFAULT (datetime('now')),
@@ -264,6 +459,7 @@ export class SqliteAdapter implements IDatabase {
         title TEXT,
         deleted_at TEXT,
         hidden INTEGER DEFAULT 0,
+        user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
         last_activity_at TEXT DEFAULT (datetime('now')),
@@ -296,6 +492,7 @@ export class SqliteAdapter implements IDatabase {
         working_path TEXT NOT NULL,
         branch_name TEXT NOT NULL,
         created_by_platform TEXT,
+        created_by_user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL,
         metadata TEXT DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT DEFAULT (datetime('now')),
@@ -319,6 +516,7 @@ export class SqliteAdapter implements IDatabase {
         current_step_index INTEGER,
         metadata TEXT DEFAULT '{}',
         parent_conversation_id TEXT REFERENCES remote_agent_conversations(id) ON DELETE SET NULL,
+        user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL,
         started_at TEXT DEFAULT (datetime('now')),
         completed_at TEXT,
         last_activity_at TEXT DEFAULT (datetime('now')),
@@ -343,7 +541,21 @@ export class SqliteAdapter implements IDatabase {
         role TEXT NOT NULL,
         content TEXT NOT NULL DEFAULT '',
         metadata TEXT DEFAULT '{}',
+        user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Per-node provider session IDs persisted across workflow re-runs
+      CREATE TABLE IF NOT EXISTS remote_agent_workflow_node_sessions (
+        workflow_name TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_session_id TEXT NOT NULL,
+        last_run_id TEXT REFERENCES remote_agent_workflow_runs(id) ON DELETE SET NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (workflow_name, node_id, scope_key, provider)
       );
 
       -- Indexes
@@ -357,7 +569,10 @@ export class SqliteAdapter implements IDatabase {
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON remote_agent_workflow_runs(status);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_run_id ON remote_agent_workflow_events(workflow_run_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_type ON remote_agent_workflow_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_workflow_events_created_at ON remote_agent_workflow_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON remote_agent_messages(conversation_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_scope ON remote_agent_workflow_node_sessions(scope_key);
+      CREATE INDEX IF NOT EXISTS idx_workflow_node_sessions_workflow ON remote_agent_workflow_node_sessions(workflow_name);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv ON remote_agent_workflow_runs(parent_conversation_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_hidden ON remote_agent_conversations(hidden);
       DROP INDEX IF EXISTS idx_conversations_codebase;
@@ -375,6 +590,14 @@ export class SqliteAdapter implements IDatabase {
         ON remote_agent_sessions(parent_session_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_conversation_started
         ON remote_agent_sessions(conversation_id, started_at DESC);
+
+      -- User identity index. user_identities is a new table created above
+      -- so its user_id column always exists. Indexes for the user_id columns
+      -- added by migrateColumns() onto pre-existing tables (conversations,
+      -- workflow_runs) are created there, alongside the ALTER TABLE — see
+      -- the comment in migrateColumns() for why this is order-sensitive.
+      CREATE INDEX IF NOT EXISTS idx_user_identities_user_id
+        ON remote_agent_user_identities(user_id);
     `);
     getLog().info('db.sqlite_schema_initialized');
   }

@@ -7,9 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-26
+
+Per-user AI credentials (API keys + subscription OAuth) with a zero-config
+encryption vault, the run-centric Console as the default UI, opt-in web login,
+model tiers/aliases with per-user overrides, and broad workflow reliability work.
+
 ### Added
 
-- MCP server support for Codex workflow nodes via the shared `loadMcpConfig` module — pass `mcp: <path>` on a Codex node and the config is translated to Codex's `mcp_servers` overrides at runtime. MCP client errors are surfaced to the workflow author as `system` chunks when MCP is explicitly configured for the node (#1459).
+- **Per-user AI-provider credentials.** Connect API keys and subscriptions (Claude
+  Pro/Max, ChatGPT/Codex, GitHub Copilot) per user; credentials are encrypted at
+  rest and injected into the acting user's runs/chat at execution time. Vendor-
+  canonical credential catalog derived from provider registrations, per-agent
+  credential cards in the console, and an Archon-owned PKCE flow for ChatGPT/Codex
+  subscription login (#1899, #1911, #1921, #1958, #1962, #1973).
+- **Zero-config credential vault.** The credential vault now works out of the box —
+  an encryption key is auto-provisioned at `~/.archon/credential-key` (0600) when
+  `TOKEN_ENCRYPTION_KEY` isn't set, so `archon ai login`/`ai key set` work on a
+  plain CLI/SQLite install. Additive: an unconnected user's ambient API keys are
+  untouched (#2040).
+- **Console is the default UI.** The run-centric console replaces the classic UI
+  (re-rooted under `/legacy`): chat restyle, run provenance, workflow-completion
+  cards, per-node cost/turns, agent-aware model pickers, settings panels, GitHub
+  identity panel, and chat file uploads (#1915, #1819, #1881, #1885, #1890, #1896,
+  #1903, #1907, #1916, #1964).
+- **Opt-in web login** via Better Auth (PostgreSQL) with a user-identity seam, a
+  server-side API gate, and safe-by-default signup posture; per-user GitHub
+  identity via device flow (#1841, #1823).
+- **Model tiers, aliases, and per-user AI preferences.** `small`/`medium`/`large`
+  tiers and `@custom` aliases resolve provider+model+options across providers;
+  per-user tiers/aliases/default-assistant overrides; an AI Settings UI and full
+  `archon ai tier|alias|default` CLI parity (#1867, #1873, #1926, #1948).
+- **CLI tier transparency.** Workflow run output now shows each AI node's resolved
+  `provider/model (← tier)`, plus a one-time notice when a run uses tiers you
+  haven't configured (#2038).
+- **Cross-provider run management** from the CLI — `workflow get/runs --json`,
+  `--detach`, a `manage-run` skill, and a native `manage_run` tool for Claude/Pi;
+  live console updates for out-of-process (CLI) runs via a DB-tail poller +
+  Postgres LISTEN/NOTIFY (#1853, #1861).
+- **Workflow engine:** typed artifacts (`output_type` sidecars), reliable
+  cross-provider structured output (validate + repair + reask + fail-fast),
+  per-node provider session persistence (`persist_session`), recommended workflows
+  pinned per project, and a model-alias resolver wired into execution (#1851,
+  #1883, #1889, #1790, #1929).
+- **`/setproject`** command to bind a conversation to a registered codebase (#1917).
+- **Session-resume outcome** (`resumed`) surfaced with a warning on cold resume
+  (#1842); **unpushed work** in `source/` surfaced after chat turns (#1978); SDK
+  lifecycle events (tasks + hooks) forwarded to the Web UI (#975).
+- **Anonymous telemetry** schema v3/v4: server heartbeat, chat turns, failure
+  taxonomy, activation funnel, and usage totals (tokens/cost) (#1944, #1949).
+- **Archon Studio** builder data model + node variants (PR-1) and a marketing
+  landing page above the docs site (#1870, #1829).
+
+### Changed
+
+- **Bumped `@anthropic-ai/claude-agent-sdk` to 0.3.193** (#2037) and migrated the
+  Pi SDK to `@earendil-works` (#1800); standardized on zod v4 (#1813).
+- PostgreSQL schema is auto-applied on startup; workspace sync is now
+  non-destructive by default (#1810, #1864).
+- `DEFAULT_AI_ASSISTANT` is treated as a fallback default, not a hard override
+  (#1919).
+
+### Fixed
+
+- DAG nodes no longer silently complete when `idle_timeout` fires before any
+  output — they fail with a clear, actionable error (#1807, #1812).
+- Direct chat now resolves credentials from the message sender and delivers Claude
+  subscriptions to Pi in chat; clarified Claude auth posture on per-user installs
+  (#1982, #1984, #2002).
+- Concurrency-safe workflow resume/cancel (CAS guards); Codex session resume
+  captures the thread id; the loader stops dropping workflow-level
+  effort/thinking/fallbackModel/betas/sandbox (#1830, #1840, #1799).
+- SQLite parity for `remote_agent_user_ai_prefs`; the Pi extension loader is
+  reused per process to stop 2nd-session hangs (#2033, #1877).
+
+### Removed
+
+- The stale `CLAUDECODE=1` nested-session warning and the
+  `ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING` env var — running the CLI inside a
+  coding agent is a supported, normal path now (#2039).
+
+## [0.4.1] - 2026-05-28
+
+Hotfix for the v0.4.0 upgrade path.
+
+### Fixed
+
+- **Upgrading from v0.3.x to v0.4.0 left every operation broken with `Error: no such column: user_id`.** The v0.4.0 SQLite schema initializer (`createSchema()`) added two `CREATE INDEX` statements referencing `user_id` on `conversations` and `workflow_runs`, but the columns themselves are added by `migrateColumns()` — which runs after `createSchema()`. On any database created before v0.4.0, `CREATE INDEX` aborted the entire init block, the `SqliteAdapter` constructor threw, and every subsequent DB call failed. New users with a fresh `~/.archon/archon.db` were unaffected because the columns are present from table creation. The fix moves both index creations into `migrateColumns()` so they run after the matching `ALTER TABLE`. A regression test seeds a pre-v0.4.0 schema and asserts the upgrade path now completes cleanly (#1792).
+
+## [0.4.0] - 2026-05-28
+
+GitHub App auth for the bot, multi-user attribution, Slack UX overhaul, experimental `/console`, two new community providers (OpenCode and GitHub Copilot), Codex MCP support, and broad workflow/provider hardening.
+
+### Added
+
+- **GitHub App authentication for the bot**: replaces the shared `GITHUB_TOKEN` PAT with a GitHub App + multi-installation routing. Each repo resolves to the installation that owns it; tokens are minted on demand, cached per installation, refreshed before expiry, and never persisted. Includes a loopback-only `/internal/git-credential` endpoint (with a hard `127.0.0.1` bind check, opt-out via `ARCHON_ALLOW_INTERNAL_ON_PUBLIC_BIND=1`) so long-running workflow `git` operations can transparently refresh installation tokens via a `git-credential-archon` helper installed into the worktree's `.git/config` (#1788).
+- **Per-user attribution**: `user_id` is now plumbed from chat and forge adapters through the orchestrator into `conversations`, `messages`, `workflow_runs`, and `isolation_environments`. New `users` and `user_identities` tables map platform identities (Slack U-id, Telegram chat id, Discord snowflake, GitHub login) to an Archon-internal user, created lazily on first sight (#1783).
+- **Slack UX upgrade**: interactive buttons, status reactions, and native slash commands replace the previous text-only flow. Approval gates, run status, and errors are now surfaced through Slack's UI primitives (#1757).
+- **Experimental run-centric console UI** at `/console`, mounted as an isolated in-repo spike under `packages/web/src/experiments/console/`. Lint-guarded against importing production web modules so it can be dropped in or deleted cleanly (#1747).
+- **`assistants.opencode` provider**: community provider that runs OpenCode as an embedded runtime, with per-node agent materialization, multi-agent sessions, structured output, token usage, and multi-agent MCP tool execution (#1384).
+- **GitHub Copilot community provider**: registered as a `builtIn: false` provider in the registry (#1505).
+- **Codex MCP nodes**: MCP server support for Codex workflow nodes via the shared `loadMcpConfig` module — pass `mcp: <path>` on a Codex node and the config is translated to Codex's `mcp_servers` overrides at runtime. MCP client errors are surfaced to the workflow author as `system` chunks when MCP is explicitly configured for the node (#1459).
+- **`always_run` node opt-out for resume caching**: opt-out for nodes that must re-execute on every resume rather than being skipped as "already completed" (closes #1391, #1730).
+- **Pi deferred extension model resolution** so Pi workflows can reference models that are only available after extension loading (#1509).
+- **Brand foundation page** at https://archon.diy/brand/, sourced from `packages/docs-web/src/content/docs/brand/` (#1745).
+- **New marketplace workflows**: `piv-system-evolution` and `archon-comprehensive-mr-review`.
+
+### Changed
+
+- **Streaming chat continuity**: typing indicators and message boundaries are more readable; rapid successive chunks no longer fragment visually (#1617).
+- **Web chat bubbles** wrap long unbreakable strings instead of overflowing (fixes #1738, #1742).
+- **Web DAG builder** recognizes `loop` and `approval` node types and renders them correctly (#1744).
+- **Web execution graph** surfaces workflow-definition fetch errors instead of silently rendering an empty graph (#1683, #1698).
+- **Web copy-message button** handles clipboard failures gracefully (#1564).
+- **Telegramify-markdown** bumped to 1.3.3 for correct blockquote escaping (#1340).
+- **Webhook clones** are placed in the workspace `source/` subdirectory to match the standard workspace layout (#1554).
+- **Global workflows** are now editable through the Web UI builder (#1557).
+- **`safeSendMessage`** consolidated into `executor-shared` to remove duplication across executor variants (#1496).
+- **Direction docs**: community-providers policy section added (#1736).
+
+### Fixed
+
+- **`workflow approve/resume/reject` no longer fail with "Workflow not found" when the run's working path is a worktree or workspace clone.** Resume, approve, and reject now use `codebase.default_cwd` for workflow YAML discovery, falling back to `working_path` when no codebase record is found. Fixes #1663 (#1743).
+- **Resume interactive workflows on chat platforms**: previously failed because the resume code path assumed web; now works for Slack and Telegram (#1756).
+- **Web approve/reject responses** surface the CLI resume command so users can copy it directly instead of having to look it up (#1523).
+- **`DEFAULT_AI_ASSISTANT`** is now read in `createCodebase` so the env var actually controls the default assistant for newly registered codebases (fixes #1703, #1746).
+- **Marketplace `decide` node** hardened against non-JSON ai-review output so a prose-prefixed verdict doesn't crash the workflow.
+- **MCP config env vars** now expand `${VAR_NAME}` brace syntax in addition to `$VAR_NAME` (#1728).
+- **`archon-refactor-safely`** persists read-only node outputs via bash bridges so downstream nodes can reference them (#1734).
+- **Workflow builder** injects `$ARGUMENTS` into generated YAMLs so user arguments reach the first node (#1733).
+- **Codex provider**: removed stale `attemptController.abort()` that crashed after SDK cleanup (#1735, #1739); fresh `AbortController` per retry attempt so a previously-aborted controller can't kill the new attempt (#1266, #1371).
+- **Claude provider** rejects directory paths in `claudeBinaryPath` and expands npm platform-package directories (e.g. `@anthropic-ai/claude-code-darwin-arm64`) to the bundled binary (#1723, #1737).
+- **Default assistant resolution**: now consults config + per-folder detection on every codebase registration, not just the first (#1729).
+- **Large node outputs** are written to a temp file and referenced rather than inlined into bash substitution, preventing argument-list corruption on big payloads (fixes #1717, #1718).
+- **Forge clone auth** resolves credentials via configured `*_URL` env vars rather than assuming `github.com` (fixes #1704, #1706); non-GitHub forge URLs authenticate via `GITLAB_TOKEN` / `GITEA_TOKEN` (fixes #1655, #1658).
+- **DAG multi-resume**: completed node state is now preserved across multiple resume cycles instead of being recomputed (#1530).
+- **Bash node variables**: user-controlled variables are passed via env vars, not shell substitution, to avoid quoting bugs and injection edge cases (#1651).
+- **Scripts**: `ARCHON_STATE_JSON` marker extraction uses line-anchored regex so embedded marker-like strings in script output don't confuse the parser (#1695).
+- **Workflows**: `condition_json_parse_failed` is now surfaced as a workflow error instead of silently skipping the conditional branch (#1673, #1694).
 
 ## [0.3.12] - 2026-05-14
 

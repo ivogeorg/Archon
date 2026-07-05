@@ -1,6 +1,6 @@
 ---
 title: AI Assistants
-description: Configure Claude Code, Codex, and Pi as AI assistants for Archon.
+description: Configure Claude Code, Codex, OpenCode, GitHub Copilot, and Pi as AI assistants for Archon.
 category: getting-started
 area: clients
 audience: [user]
@@ -9,7 +9,18 @@ sidebar:
   order: 4
 ---
 
-You must configure **at least one** AI assistant. All three can be configured and mixed within workflows.
+You must configure **at least one** AI assistant. All four can be configured and mixed within workflows.
+
+## Structured output guarantees
+
+When a workflow node sets `output_format`, the guarantee level depends on the provider's tier (exposed as `capabilities.structuredOutput` on `GET /api/providers`):
+
+| Provider | Tier | How it works | On a validation miss |
+|----------|------|--------------|----------------------|
+| Claude, Codex, OpenCode | **enforced** | The SDK/backend grammar-constrains decoding (`output_config.format` / `outputSchema` / `format:{json_schema}`). | The node **fails** — a refusal or `max_tokens` truncation can still bypass grammar enforcement, so the parsed output is validated post-parse for these too. No reask (a failure here is a genuine edge). |
+| Pi, Copilot | **best-effort** | The schema is appended to the prompt; JSON is extracted from the response and structurally repaired (trailing commas, single quotes, truncated tails). | The executor re-asks (prompt + the schema errors) up to **3×**; if still invalid, the node **fails loudly**. |
+
+In all cases the parsed output is **validated against your `output_format` schema** before downstream nodes see it, and a node that declares `output_format` but produces no schema-valid output **fails** rather than silently degrading. See [Authoring Workflows → `output_format`](/guides/authoring-workflows/#output_format-for-structured-json) for field-access (`$node.output.field`) semantics.
 
 ## Claude Code
 
@@ -232,9 +243,99 @@ If you want Codex to be the default AI assistant for new conversations without c
 DEFAULT_AI_ASSISTANT=codex
 ```
 
+### Skills
+
+Codex supports skills via filesystem auto-discovery from `.agents/skills/`. Run `archon skill install` (or `archon setup`) to install the bundled `archon` and `manage-run` skills for both Claude Code and Codex.
+
+See [Per-Node Skills](/guides/skills/#codex-compatibility) for behavior details and limitations.
+
+## OpenCode (Community Provider)
+
+**SDK-backed community provider.** Archon's OpenCode adapter uses `@opencode-ai/sdk`, which provides a multi-provider AI coding agent with support for Anthropic, OpenAI, Google, and more through a unified interface.
+
+OpenCode is registered as `builtIn: false` — like Pi, it is a bundled community provider rather than a core built-in.
+
+Archon always runs OpenCode as a **managed embedded runtime** — it spawns and owns the OpenCode server process, generates a random server password per session, and tears it down when the workflow completes. Connecting to an external OpenCode server (`baseUrl`) is not supported.
+
+### Install
+
+OpenCode is included as a dependency of `@archon/providers` — `bun install` pulls in the SDK automatically. It's available immediately.
+
+### Authenticate
+
+OpenCode handles authentication internally — Archon does not pass API keys through config. Configure credentials using one of these methods:
+
+1. **`/connect` TUI command** — Run `opencode` in your terminal, then use the `/connect` command to interactively authenticate with your chosen provider
+2. **Config file** — Store credentials in `~/.config/opencode/opencode.json` with `{env:VAR}` or `{file:PATH}` substitution
+3. **Auth file** — Credentials are persisted in `~/.local/share/opencode/auth.json` after connecting
+
+OpenCode delegates to the underlying LLM provider (Anthropic, OpenAI, Google, etc.) based on your model selection. Request-scoped env vars from Archon workflows are still merged into the OpenCode environment.
+
+### Configuration Options
+
+```yaml
+assistants:
+  opencode:
+    model: anthropic/claude-3-5-sonnet  # Required: '<provider>/<model>' format
+    # or build-in agent
+    agent: general
+```
+
+### Model reference format
+
+OpenCode models use a `<provider>/<model>` format. List all available models via `opencode models`:
+
+```yaml
+assistants:
+  opencode:
+    model: anthropic/claude-3-5-sonnet   # via Anthropic
+    # model: openai/gpt-4o                # via OpenAI
+    # model: google/gemini-2.5-pro        # via Google
+```
+
+### Supported Archon Features
+
+| Feature | Support | Notes |
+|---|---|---|
+| Session resume | ✅ | Single-agent runs return `sessionId`; multi-agent runs do not |
+| MCP servers | ✅ | `mcp: path/to/servers.json` passed through to OpenCode |
+| Structured output | ✅ | `output_format:` — schema passed to OpenCode SDK |
+| System prompt override | ✅ | `systemPrompt:` |
+| Codebase env vars (`envInjection`) | ✅ | merged into the spawned OpenCode environment |
+| Skills | ✅ | SKILL.md files with YAML frontmatter, pattern-based permissions |
+| Tool restrictions | ✅ | `tools` / `disallowedTools` per agent; deny wins over allow |
+| Inline agents (`agents:`) | ✅ | File-materialized agents; single and parallel multi-agent fan-out |
+| Hooks | ✅ | Plugin hook system (tool, session, message hooks) |
+| Effort / reasoning control | ❌ | No per-request param; not configurable in agent file, opencode puts it in config. |
+| Thinking control | ❌ | No explicit `thinking` field in agent frontmatter; OpenCode auto-enables reasoning when `agents[].model` is a reasoning-capable model (e.g. `anthropic/claude-sonnet-4-5`) |
+| Fallback model | ❌ | No native failover in the SDK |
+| Sandbox | ❌ | Not native in the SDK; Archon uses worktree isolation |
+| Cost limits (`maxBudgetUsd`) | ❌ | Cost tracked in result chunks, but no runtime budget enforcement |
+
+Unsupported YAML fields trigger a visible warning from the dag-executor when the workflow runs, so you always know what was ignored.
+
+### Usage in workflows
+
+```yaml
+name: my-workflow
+provider: opencode
+model: anthropic/claude-3-5-sonnet
+
+nodes:
+  - id: analyze
+    prompt: "Analyze the codebase structure"
+    # per-node model override:
+    # model: openai/gpt-4o
+```
+
+### See also
+
+- [Adding a Community Provider](../contributing/adding-a-community-provider/) — the contributor-facing guide for extending Archon with your own provider.
+- [OpenCode on GitHub](https://github.com/opencode-ai/opencode) — upstream project.
+
 ## Pi (Community Provider)
 
-**One adapter, ~20 LLM backends.** Pi (`@mariozechner/pi-coding-agent`) is a community-maintained coding-agent harness that Archon integrates as the first community provider. It unlocks Anthropic, OpenAI, Google (Gemini + Vertex), Groq, Mistral, Cerebras, xAI, OpenRouter, Hugging Face, and local inference (LM Studio, ollama, llamacpp, custom OpenAI-compatible endpoints registered in `~/.pi/agent/models.json`) under a single `provider: pi` entry.
+**One adapter, ~20 LLM backends.** Pi (`@earendil-works/pi-coding-agent`) is a community-maintained coding-agent harness that Archon integrates as the first community provider. It unlocks Anthropic, OpenAI, Google (Gemini + Vertex), Groq, Mistral, Cerebras, xAI, OpenRouter, Hugging Face, and local inference (LM Studio, ollama, llamacpp, custom OpenAI-compatible endpoints registered in `~/.pi/agent/models.json`) under a single `provider: pi` entry.
 
 Pi is registered as `builtIn: false` — it validates the community-provider seam rather than being a core-team-maintained option. If it proves stable and valuable it may be promoted to `builtIn: true` later.
 
@@ -261,7 +362,7 @@ Pi supports both OAuth subscriptions and API keys. Archon's adapter reads your e
 
 | Pi provider id | Env var |
 |---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` |
+| `anthropic` | `ANTHROPIC_OAUTH_TOKEN` (subscription, read first) or `ANTHROPIC_API_KEY` |
 | `openai` | `OPENAI_API_KEY` |
 | `google` | `GEMINI_API_KEY` |
 | `groq` | `GROQ_API_KEY` |
@@ -269,9 +370,9 @@ Pi supports both OAuth subscriptions and API keys. Archon's adapter reads your e
 | `cerebras` | `CEREBRAS_API_KEY` |
 | `xai` | `XAI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
-| `huggingface` | `HUGGINGFACE_API_KEY` |
+| `huggingface` | `HF_TOKEN` |
 
-Additional cloud backends exist (Azure, Bedrock, Vertex, etc.) — file an issue if you need an env-var shortcut wired for them.
+The full backend → env-var map is generated from the installed Pi SDK (`bun run generate:pi-vendor-map`) and covers every key-based backend (DeepSeek, Together, Fireworks, Azure OpenAI, Vercel AI Gateway, Cloudflare, MiniMax, Moonshot, Z.AI, Xiaomi, …). Amazon Bedrock and Google Vertex authenticate via ambient cloud credentials (AWS chain / gcloud ADC) instead of a pasted key.
 
 **Local / custom providers (no credentials needed):**
 
@@ -396,8 +497,9 @@ nodes:
 | System prompt override | ✅ | `systemPrompt:` |
 | Codebase env vars (`envInjection`) | ✅ | `.archon/config.yaml` `env:` section |
 | MCP servers | ❌ | Pi rejects MCP by design |
+| In-process native tools | ✅ | none — Archon's `manage_run` tool is auto-injected in project-scoped chat via Pi `customTools` (distinct from MCP, which Pi rejects). Gated on the `nativeTools` provider capability. |
 | Claude-SDK hooks | ❌ | Claude-specific format |
-| Structured output | ✅ (best-effort) | `output_format:` — schema is appended to the prompt and JSON is parsed out of the assistant text. Handles bare JSON, ```json```-fenced, and reasoning-model prose preambles like `Let me evaluate... {...}` (Minimax M2.x pattern). Trailing-text-interleaved cases still degrade cleanly to the missing-structured-output warning. Not SDK-enforced like Claude/Codex. |
+| Structured output | ✅ (best-effort) | `output_format:` — schema is appended to the prompt and JSON is parsed out of the assistant text. Handles bare JSON, ```json```-fenced, reasoning-model prose preambles like `Let me evaluate... {...}` (Minimax M2.x pattern), and structurally-corrupt JSON (trailing commas, single quotes, truncated tails) via repair. The parsed output is then **validated against the schema**; on a miss the executor re-asks (prompt + the schema errors) up to **3×**, and only then **fails** the node (it no longer degrades silently to a warning). Not SDK-enforced like Claude/Codex. |
 | Cost limits (`maxBudgetUsd`) | ❌ | tracked in result chunk, not enforced |
 | Fallback model | ❌ | not native in Pi |
 | Sandbox | ❌ | not native in Pi |
@@ -407,7 +509,163 @@ Unsupported YAML fields trigger a visible warning from the dag-executor when the
 ### See also
 
 - [Adding a Community Provider](../contributing/adding-a-community-provider/) — the contributor-facing guide for extending Archon with your own provider.
-- [Pi on GitHub](https://github.com/badlogic/pi-mono) — upstream project.
+- [Pi documentation](https://pi.dev) — official Pi docs (extensions, model registry, settings).
+- [Pi on GitHub](https://github.com/earendil-works/pi) — upstream project.
+
+## GitHub Copilot (Community Provider)
+
+**Use a GitHub Copilot subscription inside Archon workflows.** Drives the Copilot CLI via `@github/copilot-sdk`, supporting OpenAI, Anthropic via BYOK, Gemini, and the other models Copilot exposes — switch between them with the `model` field.
+
+Copilot is registered as `builtIn: false` — like Pi, a bundled community provider rather than a core built-in.
+
+### Install
+
+For source installs (`bun run`), the SDK + its bundled CLI dependency come along with `bun install` — nothing extra to do.
+
+For compiled Archon binaries, install the Copilot CLI yourself and point Archon at it:
+
+```bash
+npm install -g @github/copilot
+```
+
+Then tell Archon where the binary lives (the resolver searches these in order):
+
+```ini
+# .env
+COPILOT_BIN_PATH=/absolute/path/to/copilot
+```
+
+```yaml
+# .archon/config.yaml
+assistants:
+  copilot:
+    copilotCliPath: /absolute/path/to/copilot
+```
+
+Or place the binary at `~/.archon/vendor/copilot/copilot` (POSIX) / `~/.archon/vendor/copilot/copilot.exe` (Windows) and the resolver picks it up automatically.
+
+### Authenticate
+
+By default, Copilot uses the credentials from your local `copilot login`. Generic `GH_TOKEN` / `GITHUB_TOKEN` env vars are **not** picked up automatically — classic GitHub PATs lack Copilot entitlement and would fail with a misleading SDK error. Auth precedence (highest to lowest):
+
+1. **`COPILOT_GITHUB_TOKEN`** (env) — always wins when set; treated as explicit Copilot intent
+2. **`useLoggedInUser: false`** in `.archon/config.yaml` — opts into env-token auth, including generic `GH_TOKEN` / `GITHUB_TOKEN`
+3. **`copilot login` credentials** — the default
+
+An active GitHub Copilot subscription is required for any of these to work.
+
+### Copilot Configuration Options
+
+You can configure Copilot's behavior in `.archon/config.yaml`:
+
+```yaml
+assistants:
+  copilot:
+    model: gpt-5-mini             # 'gpt-5', 'gpt-5-mini', 'claude-sonnet-4.5', 'auto', etc.
+    modelReasoningEffort: medium  # 'low' | 'medium' | 'high' | 'xhigh' | 'max' (alias for xhigh)
+    # configDir: /absolute/path/to/copilot-config
+    # enableConfigDiscovery: false  # only enable for trusted repos — bypasses Archon's workflow MCP/skill validation
+    # useLoggedInUser: false        # opt into env-token auth (GH_TOKEN / GITHUB_TOKEN); default uses `copilot login`
+    # logLevel: error               # 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all'
+```
+
+Copilot accepts OpenAI models (`gpt-5`, `gpt-5-mini`), Anthropic via BYOK (`claude-sonnet-4.5`), Gemini, and more. When no model is configured, Archon passes `model: 'auto'` and Copilot picks.
+
+### Supported Archon Features
+
+| Feature | Support | Notes |
+|---|---|---|
+| Session resume | ✅ | Returns `sessionId`; reused on resume |
+| Reasoning control | ✅ | `effort:` / string `thinking:` → Copilot `reasoningEffort`; `max` maps to SDK `xhigh` |
+| System prompt override | ✅ | `systemPrompt:` |
+| Codebase env vars | ✅ | merged into the spawned Copilot CLI environment |
+| Tool restrictions | ✅ | `allowed_tools` → `availableTools`, `denied_tools` → `excludedTools` |
+| MCP servers | ✅ | `mcp: path/to/servers.json` → `SessionConfig.mcpServers` (env vars `$FOO` expanded; missing vars warned) |
+| Skills | ✅ | `skills: [name]` resolved from `.agents/skills/` or `.claude/skills/` (project or home) → `SessionConfig.skillDirectories` |
+| Structured output | ✅ | best-effort via prompt augmentation + repair; the parsed output is validated against the schema, the executor re-asks up to 3× on a miss, then **fails** the node (no longer a silent warning) |
+| Sub-agents (`agents:`) | ✅ | `name`/`description`/`prompt`/`tools` → `SessionConfig.customAgents`; Claude-specific fields (`model`, `disallowedTools`, `skills`, `maxTurns`) warn per agent and are ignored |
+| Fork-session retry | ⚠️ | Copilot SDK has no fork API — when Archon requests a fork (on retry), we create a fresh session and emit a system-chunk warning |
+| Hooks | ❌ | Archon hooks ≠ Copilot's `SessionHooks` event vocabulary |
+| Fallback model | ❌ | not wired |
+| Cost control | ❌ | no cost-limit API |
+| Sandbox | ❌ | Copilot permissions surface is separate from Archon's sandbox model |
+
+### Set as Default (Optional)
+
+```ini
+DEFAULT_AI_ASSISTANT=copilot
+```
+
+### See also
+
+- [Adding a Community Provider](../contributing/adding-a-community-provider/) — the contributor-facing guide for extending Archon with your own provider.
+- [`@github/copilot-sdk`](https://www.npmjs.com/package/@github/copilot-sdk) — upstream SDK.
+
+## Per-user credentials and AI Settings
+
+Everything above configures the **install-wide** assistant credentials (env vars, `claude /login`, etc.) — every run uses the same shared keys. On a **shared Archon box** where several people use the same server, each user can instead connect **their own** provider — by API key or subscription — so their runs and chats bill to them, not to the install's shared key.
+
+### When you need this
+
+- You run Archon for a team and want each person to bring their own provider key or Claude Pro/Max / Copilot subscription.
+- You want a personal key isolated from the shared install key.
+
+Solo users don't need any of this — the install-wide setup above is enough.
+
+### Enabling it
+
+The credential vault is available on every install — Archon auto-provisions a local key at
+`~/.archon/credential-key` on first use. **No setup required for a solo install.**
+
+If you're running a managed or multi-user deploy and want to control the encryption key yourself
+(e.g. to rotate it, share it across containers, or keep it in a secrets manager), set
+`TOKEN_ENCRYPTION_KEY` and the local key file is skipped entirely:
+
+```ini
+# .env — generate with: openssl rand -hex 32
+TOKEN_ENCRYPTION_KEY=<64-char hex>
+```
+
+> **Rotating `TOKEN_ENCRYPTION_KEY`** (or deleting `~/.archon/credential-key`) invalidates all
+> stored user credentials — everyone must reconnect. `archon doctor` will report a
+> `mass_decrypt_failure` and include a re-connect hint if this happens.
+
+### Connecting from the console
+
+The console **AI Settings** page (Settings in the web UI) has four sections:
+
+- **Model Tiers** — map the `small` / `medium` / `large` tiers to a provider + model (and optional effort). This writes the install's `tiers:` config and works on **any** install, even without `TOKEN_ENCRYPTION_KEY` (it's non-secret config). Pi tier models show a cost/reasoning/context hint from Pi's model catalog.
+- **Model Aliases** — define `@custom` refs (e.g. `@fast`) usable in workflow `model:` fields, with the same scope toggle.
+- **Agents** — one card per agent (Claude Code, Codex, Pi, OpenCode, Copilot) with the credentials it can spend nested inside, each card showing a readiness state (ready / needs credential). Connect a credential for *your* user inside the agent that uses it. Credentials are keyed by **vendor** (`anthropic`, `openai`, `github-copilot`, `openrouter`, …), and one credential serves every agent that consumes it (an `anthropic` key powers Claude Code and Pi's anthropic backend — both cards reflect it). Every vendor accepts an **API key**; **`anthropic`**, **`openai`**, and **`github-copilot`** additionally offer **subscription login** (an OAuth flow — for `openai`/ChatGPT it is an Archon-owned PKCE flow where you paste the redirect URL or code back, [#1924](https://github.com/coleam00/Archon/issues/1924)). Legacy ids (`claude`/`codex`/`copilot`) are accepted and normalized. The **Pi** card keeps its 30+ backends behind a searchable "Add backend…" picker (with model counts from Pi's catalog) and shows ambient chains (Amazon Bedrock, Google Vertex) as status-only rows; the **OpenCode** card loads its backend catalog on demand from the embedded runtime — its connections are install-wide, not per-user.
+- **Defaults** — the default assistant and per-provider model defaults, plus a "Your default" (just-me) assistant select.
+
+### Per-user model preferences ("Just me")
+
+When you're logged in (a web identity resolves), the **Model Tiers** and **Model Aliases** panels show a **"This install / Just me"** scope toggle, and **Defaults** gains a "Your default" select. The "Just me" scope stores your personal tiers/aliases/default assistant in Archon's database and applies them as the **highest-precedence** layer — your overrides win over the install config for runs and chats *you* start, without changing anyone else's. This needs an identity but **no** `TOKEN_ENCRYPTION_KEY` (model names aren't secrets); on a solo install without web auth the toggle simply doesn't appear and everything behaves exactly as before.
+
+If a chat asks for the `large` tier and only a different tier is configured, Archon uses the nearest preset and posts a one-line notice telling you which tier answered and where to set `large`.
+
+### Connecting from the CLI
+
+The same actions are available headless via [`archon ai`](/reference/cli/#ai):
+
+```bash
+# Per-user credentials (need TOKEN_ENCRYPTION_KEY)
+echo "$MY_KEY" | archon ai key set openrouter   # API key for any vendor
+archon ai login anthropic                        # subscription (anthropic, openai, or github-copilot)
+archon ai list                                   # what's connected
+
+# Model tiers + aliases + default (ungated config — solo-OK)
+archon ai tier set large claude opus
+archon ai alias set @fast claude haiku
+archon ai default claude
+
+# The same, but just for YOU (per-user prefs; identity from ARCHON_USER_ID/$USER)
+archon ai tier set large claude opus --scope user
+archon ai default codex --scope user
+```
+
+The model-tier presets are the same ones you can hand-write in `~/.archon/config.yaml`; see [Configuration](/reference/configuration/) for the YAML format.
 
 ## How Assistant Selection Works
 

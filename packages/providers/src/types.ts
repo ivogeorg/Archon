@@ -36,7 +36,50 @@ export interface CodexProviderDefaults {
 }
 
 /**
- * Community provider defaults for Pi (@mariozechner/pi-coding-agent).
+ * Community provider defaults for GitHub Copilot (@github/copilot-sdk).
+ */
+export interface CopilotProviderDefaults {
+  [key: string]: unknown;
+  /** Default model ref, e.g. 'gpt-5', 'gpt-5-mini', 'claude-sonnet-4.5'. */
+  model?: string;
+  /**
+   * Reasoning effort passed to the SDK as `reasoningEffort`. Field name
+   * mirrors `CodexProviderDefaults.modelReasoningEffort` so users get one
+   * consistent key across cross-provider configs.
+   */
+  modelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  /**
+   * Absolute path to the Copilot CLI binary. Required in compiled Archon
+   * builds when `COPILOT_BIN_PATH` env var is not set. Dev-mode builds let
+   * the SDK resolve from `$PATH`.
+   */
+  copilotCliPath?: string;
+  /**
+   * Override Copilot's config directory. When unset the SDK uses its own
+   * default (typically `~/.copilot`).
+   */
+  configDir?: string;
+  /**
+   * Opt in to Copilot's config discovery from the repo (MCP servers, skills,
+   * etc. declared in the repo's `.copilot/` directory). Disabled by default
+   * so arbitrary repos do not implicitly load MCP servers or skills.
+   * @default false
+   */
+  enableConfigDiscovery?: boolean;
+  /**
+   * Reuse the CLI's logged-in user credentials (from `copilot login`) when
+   * no explicit token is provided via env vars. Defaults to true.
+   * @default true
+   */
+  useLoggedInUser?: boolean;
+  /**
+   * Copilot CLI log level. When unset the SDK picks its own default.
+   */
+  logLevel?: 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all';
+}
+
+/**
+ * Community provider defaults for Pi (@earendil-works/pi-coding-agent).
  * v1 minimal shape; extend as capabilities are wired in.
  */
 export interface PiProviderDefaults {
@@ -98,6 +141,20 @@ export interface PiProviderDefaults {
   maxConcurrent?: number;
 }
 
+/**
+ * Community provider defaults for OpenCode (opencode-ai).
+ * Minimal shape — extend as capabilities are wired in.
+ */
+export interface OpencodeProviderDefaults {
+  [key: string]: unknown;
+  /** Default model ref in '<provider>/<model>' format, e.g. 'anthropic/claude-3-5-sonnet' */
+  model?: string;
+  /** Base URL of an existing OpenCode server to connect to. */
+  baseUrl?: string;
+  /** Default agent name from opencode.json config to use. */
+  agent?: string;
+}
+
 /** Generic per-provider defaults bag used by config surfaces and UI. */
 export type ProviderDefaults = Record<string, unknown>;
 
@@ -143,6 +200,16 @@ export type MessageChunk =
       stopReason?: string;
       numTurns?: number;
       modelUsage?: Record<string, unknown>;
+      /**
+       * Outcome of a session-resume attempt, so a failed resume is observable
+       * instead of silently continuing with a fresh (cold) session:
+       *   - `true`   a resume was requested and the prior session was restored
+       *   - `false`  a resume was requested but the provider fell back to fresh
+       *   - omitted  no resume was requested
+       * Set only when `resumeSessionId` was passed. Consumers (the dag-executor)
+       * use `false` to surface a warning rather than swallow the loss.
+       */
+      resumed?: boolean;
     }
   | { type: 'rate_limit'; rateLimitInfo: Record<string, unknown> }
   | {
@@ -161,6 +228,58 @@ export type MessageChunk =
       toolOutput: string;
       /** Matching ID for the originating `tool` chunk. See `tool` variant above. */
       toolCallId?: string;
+    }
+  // ─── Subagent Task Lifecycle (Claude SDK `system` subtypes) ────────────
+  // Forwarded by the Claude provider from SDKTaskStartedMessage /
+  // SDKTaskProgressMessage / SDKTaskNotificationMessage. Downstream (workflow
+  // executor → SSE bridge) aggregates these into `task_activity` emitter
+  // events so the Web UI can render subagent visibility per workflow node.
+  // `skip_transcript` housekeeping tasks are filtered out at the provider
+  // boundary and never reach this surface.
+  | {
+      type: 'task_started';
+      taskId: string;
+      description: string;
+      taskType?: string;
+      prompt?: string;
+      toolUseId?: string;
+    }
+  | {
+      type: 'task_progress';
+      taskId: string;
+      description: string;
+      summary?: string;
+      usage?: { total_tokens: number; tool_uses: number; duration_ms: number };
+      lastToolName?: string;
+      toolUseId?: string;
+    }
+  | {
+      type: 'task_notification';
+      taskId: string;
+      status: 'completed' | 'failed' | 'stopped';
+      summary: string;
+      outputFile: string;
+      usage?: { total_tokens: number; tool_uses: number; duration_ms: number };
+      toolUseId?: string;
+    }
+  // ─── Hook Lifecycle (Claude SDK `system` subtypes) ─────────────────────
+  // Forwarded by the Claude provider from SDKHookStartedMessage /
+  // SDKHookResponseMessage. Same aggregation path as task_* above; the bridge
+  // emits `hook_activity` for inline indicators like
+  // `PreToolUse(Bash) → approved` under the parent node.
+  | {
+      type: 'hook_started';
+      hookId: string;
+      hookName: string;
+      hookEvent: string;
+    }
+  | {
+      type: 'hook_response';
+      hookId: string;
+      hookName: string;
+      hookEvent: string;
+      outcome: 'success' | 'error' | 'cancelled';
+      exitCode?: number;
     }
   | { type: 'workflow_dispatch'; workerConversationId: string; workflowName: string };
 
@@ -194,6 +313,33 @@ export interface AgentRequestOptions {
   forkSession?: boolean;
   /** When false, skip writing session transcript to disk. */
   persistSession?: boolean;
+  /**
+   * In-process tools the model may call this turn. Defined once by the caller
+   * (e.g. core's manage_run) and adapted per provider — Claude wraps each via
+   * `createSdkMcpServer`/`tool()`, Pi via `customTools`. Providers without an
+   * in-process tool path (Codex/OpenCode) ignore them. Gated on the
+   * `nativeTools` capability.
+   */
+  nativeTools?: NativeTool[];
+}
+
+/**
+ * A provider-neutral in-process tool. The handler runs in the host process and
+ * closes over whatever live context it needs (DB, operations, conversation), so
+ * `@archon/providers` never imports `@archon/core` — the tool crosses the
+ * boundary as data + a function on the request options.
+ *
+ * `inputSchema` is canonical JSON Schema (object). Each provider converts it to
+ * its SDK's schema form. The handler is expected to return a text result rather
+ * than throw — provider adapters add no safety net, so an uncaught throw would
+ * surface into the agent loop. (core's `buildManageRunTool` guarantees this with
+ * an outer try/catch around its dispatch.)
+ */
+export interface NativeTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handler: (input: Record<string, unknown>) => Promise<string>;
 }
 
 /**
@@ -201,6 +347,8 @@ export interface AgentRequestOptions {
  * Providers translate fields they understand; unknown fields are ignored.
  */
 export interface NodeConfig {
+  /** Node ID from the workflow DAG — used by providers for per-node isolation (e.g., session dirs). */
+  nodeId?: string;
   mcp?: string;
   hooks?: unknown;
   skills?: string[];
@@ -241,6 +389,13 @@ export interface NodeConfig {
   systemPrompt?: SystemPromptInput;
   fallbackModel?: string;
   idle_timeout?: number;
+  /**
+   * Per-node override for Claude's `agentProgressSummaries` flag (Phase 4 of #975).
+   * When unset, workflow nodes default to `true` (so the Web UI gets AI-generated
+   * `summary` fields on `task_progress` every ~30s). Authors can explicitly set
+   * `false` to opt out for a specific node.
+   */
+  agentProgressSummaries?: boolean;
   [key: string]: unknown;
 }
 
@@ -268,14 +423,66 @@ export interface ProviderCapabilities {
   /** Whether the provider supports inline sub-agent definitions (Claude SDK's options.agents). */
   agents: boolean;
   toolRestrictions: boolean;
-  structuredOutput: boolean;
+  /**
+   * Structured-output guarantee tier for `output_format`:
+   *  - `'enforced'`    — SDK/backend grammar-constrains decoding (Claude, Codex,
+   *    OpenCode). The request path is native; Archon still validates post-parse
+   *    as a net for the refusal / `max_tokens`-truncation edges.
+   *  - `'best-effort'` — prompt-augmentation + repair + post-parse validate (Pi,
+   *    Copilot). No backend grammar; on a validation miss the executor re-asks up
+   *    to 3× (prompt + schema errors), then fails the node.
+   *  - `false`         — the provider cannot produce structured output at all.
+   */
+  structuredOutput: 'enforced' | 'best-effort' | false;
   envInjection: boolean;
   costControl: boolean;
   effortControl: boolean;
   thinkingControl: boolean;
   fallbackModel: boolean;
   sandbox: boolean;
+  /** Whether the provider can register in-process `NativeTool`s for a turn. */
+  nativeTools: boolean;
 }
+
+/**
+ * How a credential of a given vendor can be connected / detected.
+ *  - `api_key`      — a pasteable bearer string, stored encrypted per user.
+ *  - `subscription` — an OAuth login (Claude Pro/Max, GitHub Copilot, ChatGPT).
+ *  - `ambient`      — cloud credential chains detected from the environment
+ *    (AWS for Bedrock, gcloud ADC for Vertex). Never stored, status-only.
+ *
+ * Exported as a const tuple so API schemas can derive `z.enum(CREDENTIAL_KINDS)`
+ * instead of re-listing the literals.
+ */
+export const CREDENTIAL_KINDS = ['api_key', 'subscription', 'ambient'] as const;
+export type CredentialKind = (typeof CREDENTIAL_KINDS)[number];
+
+/**
+ * One upstream-vendor credential an agent provider can consume. `vendor` is the
+ * canonical credential id (e.g. 'anthropic', 'openrouter', 'github-copilot') —
+ * deliberately NOT the agent provider id: one credential can serve multiple
+ * agents (an 'anthropic' key powers Claude Code, Pi's anthropic backend, and
+ * OpenCode). Delivery (vendor → env vars / files) is owned by
+ * @archon/core/credentials — this spec is only the consumption matrix.
+ */
+export interface CredentialSpec {
+  /** Canonical vendor id — used as the storage key in user_provider_keys. */
+  vendor: string;
+  /** Human-readable vendor name for UI display (e.g. 'OpenRouter'). */
+  displayName: string;
+  /** Which connection kinds this vendor supports for this agent (at least one). */
+  kinds: [CredentialKind, ...CredentialKind[]];
+}
+
+/**
+ * An agent's credential catalog. `static` lists the vendors up front
+ * (Claude/Codex/Copilot/Pi); `dynamic` means the set is only knowable at
+ * runtime (OpenCode resolves its models.dev catalog via the embedded server's
+ * introspection API and exposes it through a dedicated endpoint).
+ */
+export type ProviderCredentialCatalog =
+  | { kind: 'static'; specs: CredentialSpec[] }
+  | { kind: 'dynamic' };
 
 /**
  * Registration entry for a provider in the provider registry.
@@ -297,6 +504,14 @@ export interface ProviderRegistration {
 
   /** Whether this is a built-in (maintained by core team) or community provider */
   builtIn: boolean;
+
+  /**
+   * Credentials this agent can consume. Required: registering an agent without
+   * declaring its credential surface is a bug, not a default (#1955) — the
+   * connectable-vendor catalog and the agent→credential matrix in
+   * GET /api/auth/providers are derived from these declarations.
+   */
+  credentials: ProviderCredentialCatalog;
 }
 
 /**
