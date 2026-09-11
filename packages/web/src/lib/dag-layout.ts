@@ -45,7 +45,7 @@ export function layoutWithDagre(
 
 export function resolveNodeDisplay(dn: DagNode): {
   label: string;
-  nodeType: 'command' | 'prompt' | 'bash' | 'loop' | 'approval';
+  nodeType: 'command' | 'prompt' | 'bash' | 'loop' | 'approval' | 'wait';
   promptText?: string;
   bashScript?: string;
   bashTimeout?: number;
@@ -62,10 +62,24 @@ export function resolveNodeDisplay(dn: DagNode): {
     return { label: dn.command, nodeType: 'command' };
   }
   if ('loop' in dn && dn.loop) {
+    if (dn.loop.command) {
+      return { label: dn.loop.command, nodeType: 'loop' };
+    }
     return { label: 'Loop', nodeType: 'loop', promptText: dn.loop.prompt };
   }
   if ('approval' in dn && dn.approval) {
     return { label: 'Approval', nodeType: 'approval' };
+  }
+  if ('wait' in dn && dn.wait) {
+    const condition =
+      'event' in dn.wait
+        ? dn.wait.event
+        : 'until' in dn.wait
+          ? dn.wait.until
+          : 'attention' in dn.wait
+            ? dn.wait.attention
+            : `${String(dn.wait.duration_ms)} ms`;
+    return { label: 'Wait', nodeType: 'wait', promptText: condition };
   }
   return {
     label: 'Prompt',

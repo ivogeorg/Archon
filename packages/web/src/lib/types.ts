@@ -2,6 +2,7 @@
  * Frontend-specific types for the Archon Web UI.
  * SSE event types match what the Web adapter emits.
  */
+import type { components } from '@/lib/api.generated';
 
 export type WorkflowRunStatus =
   | 'pending'
@@ -12,6 +13,26 @@ export type WorkflowRunStatus =
   | 'paused';
 export type WorkflowStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 export type ArtifactType = 'pr' | 'commit' | 'file_created' | 'file_modified' | 'branch';
+export type SkipCause = components['schemas']['SkipCause'];
+export type NodeSkipReason = components['schemas']['NodeSkipReason'];
+
+/**
+ * Framework category the server attaches to a message it emitted itself (as
+ * opposed to the agent's own prose). Mirrors `MessageMetadata['category']` in
+ * `@archon/core` — `@archon/web` is a client package and cannot import from a
+ * server package, so the union is restated here.
+ *
+ * An unrecognized value is a wider server, not an error: TypeScript does not
+ * narrow at runtime, and every consumer asks a predicate ("is this a workflow
+ * status?") rather than switching exhaustively, so a new category degrades to
+ * ordinary prose.
+ */
+export type MessageCategory =
+  | 'tool_call_formatted'
+  | 'workflow_status'
+  | 'workflow_dispatch_status'
+  | 'isolation_context'
+  | 'workflow_result';
 
 // Base SSE event
 interface BaseSSEEvent {
@@ -24,7 +45,18 @@ export interface TextEvent extends BaseSSEEvent {
   type: 'text';
   content: string;
   isComplete: boolean;
+  /** Present only on server-emitted framework messages; absent for agent prose. */
+  category?: MessageCategory;
+  /** Present only on `workflow_result` messages — identifies the finished run. */
+  workflowResult?: { workflowName: string; runId: string };
 }
+
+/**
+ * The non-text fields of a `text` SSE event, as handed to an `onText` handler.
+ * `useSSE` batches text over a 50 ms window, so this describes the flushed
+ * segment rather than any single event.
+ */
+export type TextEventMeta = Pick<TextEvent, 'category' | 'workflowResult'>;
 
 // Tool call started
 export interface ToolCallEvent extends BaseSSEEvent {
@@ -114,16 +146,7 @@ export interface LoopIterationEvent extends BaseSSEEvent {
 }
 
 // DAG node status (emitted during DAG workflow execution)
-export interface DagNodeEvent extends BaseSSEEvent {
-  type: 'dag_node';
-  runId: string;
-  nodeId: string;
-  name: string;
-  status: WorkflowStepStatus;
-  duration?: number;
-  error?: string;
-  reason?: 'when_condition' | 'trigger_rule';
-}
+export type DagNodeEvent = components['schemas']['DagNodeSseEvent'];
 
 // Workflow tool activity (tool_started / tool_completed from executor)
 export interface WorkflowToolActivityEvent extends BaseSSEEvent {
@@ -249,6 +272,13 @@ export interface ChatMessage {
   timestamp: number;
   isStreaming?: boolean;
   files?: FileAttachment[];
+  /**
+   * Category of the `text` event that opened this message. Retained so the next
+   * event can test the *previous* segment's category, the same way
+   * `BufferedSegment.category` works server-side in the web adapter's
+   * `MessagePersistence`.
+   */
+  category?: MessageCategory;
   workflowDispatch?: {
     workerConversationId: string;
     workflowName: string;
@@ -316,7 +346,8 @@ export interface DagNodeState {
   status: WorkflowStepStatus;
   duration?: number;
   error?: string;
-  reason?: 'when_condition' | 'trigger_rule';
+  reason?: DagNodeEvent['reason'];
+  cause?: DagNodeEvent['cause'];
   currentIteration?: number;
   maxIterations?: number;
   iterations?: LoopIterationInfo[];
@@ -337,6 +368,8 @@ export interface WorkflowState {
   runId: string;
   workflowName: string;
   status: WorkflowRunStatus;
+  /** Complete dashboard snapshot; absent until the run-list projection has been hydrated. */
+  activeNodeIds?: string[];
   dagNodes: DagNodeState[];
   artifacts: WorkflowArtifact[];
   currentIteration?: number;

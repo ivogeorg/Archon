@@ -19,11 +19,14 @@ const baseRun: Omit<Run, 'id' | 'workflow' | 'status'> = {
   costUsd: null,
   conversationId: null,
   conversationPlatformId: null,
+  workerPlatformId: null,
   origin: 'cli',
+  outcome: null,
   startedAt: new Date(Date.now() - 4 * 60 * 1000 - 12 * 1000).toISOString(),
   finishedAt: null,
   workingPath: null,
   userMessage: '',
+  activeNodes: [],
 };
 
 const SAMPLE_RUNS: Run[] = [
@@ -32,6 +35,7 @@ const SAMPLE_RUNS: Run[] = [
     id: 'a4f2c918-running',
     workflow: 'plan',
     status: 'running',
+    activeNodes: ['plan/draft'],
     currentNode: 'plan/draft',
     lastTool: 'read_file',
   },
@@ -41,10 +45,14 @@ const SAMPLE_RUNS: Run[] = [
     workflow: 'review',
     origin: 'web',
     status: 'paused',
+    outcome: 'succeeded',
     startedAt: new Date(Date.now() - 14 * 60 * 1000 - 22 * 1000).toISOString(),
     approval: {
       nodeId: 'implement/verify',
       message: 'Approve running bun validate?',
+      completionSignaled: false,
+      decisions: [{ id: 'approve' }, { id: 'reject' }],
+      decisionsAuthored: false,
     },
   },
   {
@@ -63,6 +71,7 @@ const SAMPLE_RUNS: Run[] = [
     workflow: 'implement',
     origin: 'github',
     status: 'completed',
+    outcome: 'failed',
     startedAt: new Date(Date.now() - 8 * 60 * 1000 - 14 * 1000).toISOString(),
     finishedAt: new Date().toISOString(),
   },
@@ -133,7 +142,7 @@ const BUILDER_FIXTURE_KEYS = Object.keys(FIXTURES);
 
 /**
  * Workflow Builder preview: fixture switcher over PR-1's typed fixtures so a
- * reviewer can see all seven node variants rendering with no server running.
+ * reviewer can see all eight node variants rendering with no server running.
  */
 function BuilderPreview(): ReactElement {
   const [fixtureKey, setFixtureKey] = useState<string>('mixed');

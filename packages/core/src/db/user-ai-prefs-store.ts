@@ -8,17 +8,21 @@
  * `JSON.parse` on read — so SQLite and Postgres behave identically. An empty
  * map is persisted as NULL (never `'{}'`).
  *
- * Validation of tier names / alias names / providers belongs to the callers
- * (routes + CLI) — the store is a dumb per-key merge.
+ * Write validation of alias names and providers belongs to the callers
+ * (routes + CLI). Stored tier and alias shapes are validated again on read so
+ * legacy or corrupt JSON cannot escape as typed preferences.
  */
 import { pool, getDialect } from './connection';
 import { createLogger } from '@archon/paths';
-import type {
-  RawAliasEntry,
-  RawAliasesConfig,
-  RawTiersConfig,
-  TierName,
-} from '@archon/workflows/model-validation';
+import {
+  rawAliasesConfigSchema,
+  rawTiersConfigSchema,
+  type RawAliasEntry,
+  type RawAliasesConfig,
+  type RawTiersConfig,
+  type TierName,
+} from '@archon/workflows/schemas/model-binding';
+import type { ZodType } from 'zod';
 import type { UserAiPrefsRow } from '../schemas/user-ai-prefs-row';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -32,21 +36,46 @@ export interface UserAiPrefs {
   tiers?: RawTiersConfig;
   aliases?: RawAliasesConfig;
   defaultProvider?: string;
+  /**
+   * Per-user default CHAT model (#1998) — replaces the `large`-tier lookup at
+   * the chat call-site only (workflows still resolve `large`). Only meaningful
+   * together with `defaultProvider`; written atomically with it (see
+   * {@link setUserDefault}).
+   */
+  defaultModel?: string;
 }
 
 /** Per-key patch: `null` unsets a key, an entry upserts it. */
 export type UserTiersPatch = Partial<Record<TierName, RawAliasEntry | null>>;
 export type UserAliasesPatch = Record<string, RawAliasEntry | null>;
 
-function parseJsonColumn(userId: string, column: string, raw: string | null): unknown {
+function parseJsonColumn<T>(
+  userId: string,
+  column: string,
+  raw: string | null,
+  schema: ZodType<T>
+): T | undefined {
   if (!raw) return undefined;
+  let parsed: unknown;
   try {
-    return JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch (err) {
     // A corrupt column must not break model resolution — log and behave as unset.
     getLog().error({ err: err as Error, userId, column }, 'db.user_ai_prefs_parse_failed');
     return undefined;
   }
+
+  const result = schema.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+      .join('; ');
+    const err = new Error(`Invalid stored AI preferences in '${column}': ${issues}`);
+    // Treat only the invalid column as unset so valid preferences in the row survive.
+    getLog().error({ err, userId, column }, 'db.user_ai_prefs_validation_failed');
+    return undefined;
+  }
+  return result.data;
 }
 
 /** Fetch a user's AI prefs. Returns `{}` when the user has no row. */
@@ -65,19 +94,20 @@ export async function getUserAiPrefs(userId: string): Promise<UserAiPrefs> {
   }
   const row = result.rows[0];
   if (!row) return {};
-  const tiers = parseJsonColumn(userId, 'tiers', row.tiers) as RawTiersConfig | undefined;
-  const aliases = parseJsonColumn(userId, 'aliases', row.aliases) as RawAliasesConfig | undefined;
+  const tiers = parseJsonColumn(userId, 'tiers', row.tiers, rawTiersConfigSchema);
+  const aliases = parseJsonColumn(userId, 'aliases', row.aliases, rawAliasesConfigSchema);
   return {
     ...(tiers !== undefined ? { tiers } : {}),
     ...(aliases !== undefined ? { aliases } : {}),
     ...(row.default_provider ? { defaultProvider: row.default_provider } : {}),
+    ...(row.default_model ? { defaultModel: row.default_model } : {}),
   };
 }
 
 /** Upsert one column on the user's row (creates the row when absent). */
 async function upsertPrefsColumn(
   userId: string,
-  column: 'tiers' | 'aliases' | 'default_provider',
+  column: 'tiers' | 'aliases',
   value: string | null
 ): Promise<void> {
   const dialect = getDialect();
@@ -142,12 +172,35 @@ export async function setUserAliases(userId: string, patch: UserAliasesPatch): P
   await upsertPrefsColumn(userId, 'aliases', toJsonOrNull(merged));
 }
 
-/** Set (or clear with `null`) the user's default assistant. */
-export async function setUserDefaultProvider(
+/**
+ * Set (or clear with `null`) the user's default assistant + default chat
+ * model. The two columns are ALWAYS written together: a model pin is only
+ * meaningful for the provider it was set with, so preserving an old model
+ * across a provider switch would let a stale pin ride the new provider.
+ * Callers enforce "model requires a provider" before reaching the store.
+ */
+export async function setUserDefault(
   userId: string,
-  provider: string | null
+  provider: string | null,
+  model: string | null
 ): Promise<void> {
-  await upsertPrefsColumn(userId, 'default_provider', provider);
+  const dialect = getDialect();
+  const id = dialect.generateUuid();
+  try {
+    await pool.query(
+      `INSERT INTO remote_agent_user_ai_prefs (id, user_id, default_provider, default_model)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET default_provider = $3, default_model = $4, updated_at = ${dialect.now()}`,
+      [id, userId, provider, model]
+    );
+  } catch (err) {
+    getLog().error(
+      { err: err as Error, userId, column: 'default' },
+      'db.user_ai_prefs_write_failed'
+    );
+    throw err;
+  }
+  getLog().debug({ userId, column: 'default' }, 'db.user_ai_prefs_set_completed');
 }
 
 /** Delete the user's prefs row entirely. Idempotent. */

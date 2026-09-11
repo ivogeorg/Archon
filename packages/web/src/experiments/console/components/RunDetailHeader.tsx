@@ -4,8 +4,9 @@ import { LiveDot } from './LiveDot';
 import { OriginBadge } from './OriginBadge';
 import type { Run } from '../primitives/run';
 import { shortRunId, formatElapsed, elapsedSince, formatCost } from '../lib/format';
-import { useIsDocker, openInIde } from '../lib/health';
-import { statusLabel, statusTextClass } from '../lib/run-status';
+import { useIsDocker, useIdeEnv, openInIde } from '../lib/health';
+import { runStatusLabel, statusTextClass } from '../lib/run-status';
+import { RunOutcomeBadge } from './RunOutcomeBadge';
 
 interface RunDetailHeaderProps {
   run: Run;
@@ -36,6 +37,7 @@ export function RunDetailHeader({
   const isPaused = run.status === 'paused';
   const isRunning = run.status === 'running';
   const isDocker = useIsDocker();
+  const ideEnv = useIdeEnv();
   const canOpenIde = !isDocker && run.workingPath !== null && run.workingPath !== '';
 
   const copyRunId = async (): Promise<void> => {
@@ -101,9 +103,11 @@ export function RunDetailHeader({
         <span
           className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${statusTextClass[run.status]}`}
         >
-          {statusLabel[run.status]}
+          {runStatusLabel(run)}
         </span>
       </div>
+
+      <RunOutcomeBadge outcome={run.outcome} />
 
       {/* Workflow name */}
       <span className="text-sm font-medium text-text-primary">{run.workflow}</span>
@@ -126,7 +130,7 @@ export function RunDetailHeader({
           <button
             type="button"
             onClick={() => {
-              if (run.workingPath !== null) openInIde(run.workingPath);
+              if (run.workingPath !== null) openInIde(run.workingPath, ideEnv);
             }}
             title={`Open ${run.workingPath} in IDE`}
             aria-label="Open in IDE"

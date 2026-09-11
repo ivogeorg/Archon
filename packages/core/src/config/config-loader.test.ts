@@ -17,9 +17,11 @@ mock.module('@archon/paths', () => ({
 
 // Mock fs/promises so that readConfigFile/writeConfigFile (which call fsReadFile/writeFile
 // internally) are intercepted regardless of Bun version mock.module semantics.
-const mockFsReadFile = mock(() => Promise.resolve(''));
-const mockFsWriteFile = mock(() => Promise.resolve());
-const mockFsMkdir = mock(() => Promise.resolve(undefined));
+const mockFsReadFile = mock<(path: string) => Promise<string>>(() => Promise.resolve(''));
+const mockFsWriteFile = mock<(path: string, content: string) => Promise<void>>(() =>
+  Promise.resolve()
+);
+const mockFsMkdir = mock<(path: string) => Promise<void>>(() => Promise.resolve());
 
 mock.module('fs/promises', () => ({
   readFile: mockFsReadFile,
@@ -101,6 +103,86 @@ concurrency:
       expect(config.concurrency?.maxConversations).toBe(5);
     });
 
+    test.each([
+      ['tiers', 'medium'],
+      ['aliases', "'@deep'"],
+    ] as const)(
+      'rejects retired thinking in global %s config and names effort',
+      async (field, entry) => {
+        mockLogger.error.mockClear();
+        mockFsReadFile.mockResolvedValue(`
+${field}:
+  ${entry}: { provider: claude, model: opus, thinking: adaptive }
+`);
+
+        const config = await loadGlobalConfig();
+
+        expect(config).toEqual({});
+        const [{ err }, event] = mockLogger.error.mock.calls.at(-1) as unknown as [
+          { err: Error },
+          string,
+        ];
+        expect(event).toBe('config_load_error');
+        expect(err.message).toMatch(new RegExp(`${field}\\..*thinking.*effort:`));
+      }
+    );
+
+    test('rejects malformed quota continuation policy at config ingress', async () => {
+      mockFsReadFile.mockResolvedValue(`
+workflows:
+  autoResumeOnQuotaReset: yes
+  quotaMaxAttempts: 1.5
+  quotaDeadlineMs: -1
+`);
+
+      const config = await loadGlobalConfig();
+
+      expect(config).toEqual({});
+      expect(mockLogger.error).toHaveBeenCalled();
+    });
+
+    test('rejects quota continuation delays beyond the persisted timestamp range', async () => {
+      mockFsReadFile.mockResolvedValue(`
+workflows:
+  quotaFallbackDelayMs: 31536000000001
+  quotaDeadlineMs: 31536000000001
+`);
+
+      const config = await loadGlobalConfig();
+
+      expect(config).toEqual({});
+      expect(mockLogger.error).toHaveBeenCalled();
+    });
+
+    test('accepts quota continuation delays at the persisted timestamp bound', async () => {
+      mockFsReadFile.mockResolvedValue(`
+workflows:
+  quotaFallbackDelayMs: 31536000000000
+  quotaDeadlineMs: 31536000000000
+`);
+
+      const config = await loadGlobalConfig();
+
+      expect(config.workflows).toEqual({
+        quotaFallbackDelayMs: 31_536_000_000_000,
+        quotaDeadlineMs: 31_536_000_000_000,
+      });
+    });
+
+    test('keeps ordinary config forward-compatible with unknown workflow settings', async () => {
+      mockFsReadFile.mockResolvedValue(`
+defaultAssistant: codex
+workflows:
+  autoResumeOnQuotaReset: true
+  futurePolicy: enabled
+`);
+
+      const config = await loadGlobalConfig();
+
+      expect(config.defaultAssistant).toBe('codex');
+      expect(config.workflows).toEqual({ autoResumeOnQuotaReset: true });
+    });
+
     test('caches config on subsequent calls', async () => {
       mockFsReadFile.mockResolvedValue('defaultAssistant: claude');
 
@@ -175,6 +257,31 @@ concurrency:
       const config = await loadRepoConfig('/test/repo');
       expect(config).toEqual({});
     });
+
+    test.each([
+      ['tiers', 'medium'],
+      ['aliases', "'@deep'"],
+    ] as const)(
+      'rejects retired thinking in repository %s config and names effort',
+      async (field, entry) => {
+        mockLogger.error.mockClear();
+        mockFsReadFile.mockResolvedValue(`
+assistant: codex
+${field}:
+  ${entry}: { provider: claude, model: opus, thinking: adaptive }
+`);
+
+        const config = await loadRepoConfig('/test/repo');
+
+        expect(config).toEqual({});
+        const [{ err }, event] = mockLogger.error.mock.calls.at(-1) as unknown as [
+          { err: Error },
+          string,
+        ];
+        expect(event).toBe('config_load_error');
+        expect(err.message).toMatch(new RegExp(`${field}\\..*thinking.*effort:`));
+      }
+    );
 
     test('logs error for invalid YAML syntax', async () => {
       mockLogger.error.mockClear();
@@ -280,6 +387,33 @@ recommendedWorkflows: "archon-plan"
       expect(config.assistants.codex).toEqual({});
       expect(config.streaming.telegram).toBe('stream');
       expect(config.concurrency.maxConversations).toBe(10);
+      expect(config.workflows).toEqual({
+        autoResumeOnQuotaReset: false,
+        quotaMaxAttempts: 1,
+        quotaDeadlineMs: 86_400_000,
+      });
+    });
+
+    test('merges global and repo quota continuation policy per field', async () => {
+      mockFsReadFile.mockResolvedValueOnce(`
+workflows:
+  autoResumeOnQuotaReset: true
+  quotaFallbackDelayMs: 3600000
+  quotaMaxAttempts: 2
+`).mockResolvedValueOnce(`
+workflows:
+  quotaMaxAttempts: 3
+  quotaDeadlineMs: 43200000
+`);
+
+      const config = await loadConfig('/test/repo');
+
+      expect(config.workflows).toEqual({
+        autoResumeOnQuotaReset: true,
+        quotaFallbackDelayMs: 3_600_000,
+        quotaMaxAttempts: 3,
+        quotaDeadlineMs: 43_200_000,
+      });
     });
 
     test('env var DEFAULT_AI_ASSISTANT is a fallback — config file assistant wins', async () => {
@@ -408,7 +542,7 @@ streaming:
         }
         if (pathMatches(path, '.archon/config.yaml') && !globalConfigRead) {
           globalConfigRead = true;
-          return `assistants:\n  claude:\n    model: sonnet\n  codex:\n    model: gpt-5.2-codex\n    modelReasoningEffort: medium\n`;
+          return `assistants:\n  claude:\n    model: sonnet\n  codex:\n    model: gpt-5.6-sol\n    modelReasoningEffort: medium\n`;
         }
         const error = new Error('ENOENT') as NodeJS.ErrnoException;
         error.code = 'ENOENT';
@@ -417,7 +551,7 @@ streaming:
 
       const config = await loadConfig('/test/repo');
       expect(config.assistants.claude.model).toBe('sonnet');
-      expect(config.assistants.codex.model).toBe('gpt-5.2-codex');
+      expect(config.assistants.codex.model).toBe('gpt-5.6-sol');
       expect(config.assistants.codex.modelReasoningEffort).toBe('medium');
       expect(config.assistants.codex.webSearchMode).toBe('live');
       expect(config.assistants.codex.additionalDirectories).toEqual(['/repo']);
@@ -474,6 +608,59 @@ worktree:
 
       const config = await loadConfig('/test/repo');
       expect(config.baseBranch).toBeUndefined();
+    });
+
+    test('propagates remote from repo worktree config', async () => {
+      const pathMatches = (path: string, pattern: string): boolean => {
+        const normalizedPath = path.replace(/\\/g, '/');
+        return normalizedPath.includes(pattern);
+      };
+
+      mockFsReadFile.mockImplementation(async (path: string) => {
+        if (pathMatches(path, '/repo/.archon/config.yaml')) {
+          return `
+worktree:
+  remote: upstream
+`;
+        }
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
+
+      const config = await loadConfig('/test/repo');
+      expect(config.remote).toBe('upstream');
+    });
+
+    test('trims whitespace from remote', async () => {
+      const pathMatches = (path: string, pattern: string): boolean => {
+        const normalizedPath = path.replace(/\\/g, '/');
+        return normalizedPath.includes(pattern);
+      };
+
+      mockFsReadFile.mockImplementation(async (path: string) => {
+        if (pathMatches(path, '/repo/.archon/config.yaml')) {
+          return `
+worktree:
+  remote: "  mar  "
+`;
+        }
+        const error = new Error('ENOENT') as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      });
+
+      const config = await loadConfig('/test/repo');
+      expect(config.remote).toBe('mar');
+    });
+
+    test('remote is undefined when not configured', async () => {
+      const error = new Error('ENOENT') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      mockFsReadFile.mockRejectedValue(error);
+
+      const config = await loadConfig('/test/repo');
+      expect(config.remote).toBeUndefined();
     });
 
     test('global aliases are propagated to merged config', async () => {
@@ -746,7 +933,7 @@ defaultAssistant: codex
 botName: MyBot
 assistants:
   codex:
-    model: gpt-5.3-codex
+    model: gpt-5.6-sol
     modelReasoningEffort: medium
 `);
 
@@ -758,6 +945,28 @@ assistants:
       const writtenContent = mockFsWriteFile.mock.calls[0]?.[1] as string;
       expect(writtenContent).toContain('claude');
       expect(writtenContent).toContain('MyBot');
+    });
+
+    test('merges workflow continuation policy into the persisted config', async () => {
+      mockFsReadFile.mockResolvedValue(`
+workflows:
+  autoResumeOnQuotaReset: false
+  quotaMaxAttempts: 2
+`);
+
+      await updateGlobalConfig({
+        workflows: { autoResumeOnQuotaReset: true, quotaFallbackDelayMs: 60_000 },
+      });
+
+      const writtenContent = mockFsWriteFile.mock.calls[0]?.[1] as string;
+      const written = Bun.YAML.parse(writtenContent) as {
+        workflows?: Record<string, unknown>;
+      };
+      expect(written.workflows).toEqual({
+        autoResumeOnQuotaReset: true,
+        quotaMaxAttempts: 2,
+        quotaFallbackDelayMs: 60_000,
+      });
     });
 
     test('creates config when file does not exist', async () => {

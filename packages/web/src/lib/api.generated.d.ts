@@ -437,6 +437,15 @@ export interface paths {
             'application/json': components['schemas']['Error'];
           };
         };
+        /** @description OAuth callback port still held by a previous login attempt — retry shortly */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
       };
     };
     delete?: never;
@@ -503,6 +512,261 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  '/api/auth/me/ai-prefs': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get the current web user’s AI preferences (tiers/aliases/default assistant) */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description The user’s stored prefs (raw per-user layer, not merged with config) */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['UserAiPrefs'];
+          };
+        };
+        /** @description Web auth required */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/auth/me/ai-prefs/tiers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update the current web user’s model-tier presets (per-key merge; null unsets) */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['UpdateUserTiersBody'];
+        };
+      };
+      responses: {
+        /** @description Updated prefs */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['UserAiPrefs'];
+          };
+        };
+        /** @description Unknown provider or invalid effort */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Web auth required */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    trace?: never;
+  };
+  '/api/auth/me/ai-prefs/aliases': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update the current web user’s @custom aliases (per-key merge; null unsets) */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['UpdateUserAliasesBody'];
+        };
+      };
+      responses: {
+        /** @description Updated prefs */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['UserAiPrefs'];
+          };
+        };
+        /** @description Invalid alias name, unknown provider, or invalid effort */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Web auth required */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    trace?: never;
+  };
+  '/api/auth/me/ai-prefs/default': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Set (or clear with null) the current web user’s default assistant + default chat model (written atomically; omitted model clears any pin) */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['UpdateUserDefaultBody'];
+        };
+      };
+      responses: {
+        /** @description Updated prefs */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['UserAiPrefs'];
+          };
+        };
+        /** @description Unknown provider */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Web auth required */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
     trace?: never;
   };
   '/api/conversations': {
@@ -1251,7 +1515,7 @@ export interface paths {
     put?: never;
     /**
      * Run a workflow via the orchestrator (JSON or multipart with file uploads)
-     * @description Accepts `application/json` with `{ conversationId, message }` or `multipart/form-data` with `conversationId`, `message`, and optional file attachments (max 5 files, 10 MB each).
+     * @description Accepts `application/json` with `{ conversationId, message, inputs?, config?, tiers?, aliases? }` or `multipart/form-data` with `conversationId`, `message`, optional `inputs` and `config` fields holding their objects JSON-encoded, optional `tiers` and `aliases` JSON object fields, and optional file attachments (max 5 files, 10 MB each). `inputs` supplies values for the workflow's declared `inputs:` (#2554); it is validated against the declaration before any worktree, clone, or AI cost, so a missing required input or an undeclared key is refused up front. `config` supplies a sparse runtime layer; `tiers` and `aliases` rebind named model presets above it. Caller-supplied filesystem config paths are rejected.
      */
     post: {
       parameters: {
@@ -1482,6 +1746,80 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/workflows/runs/{runId}/signal': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Signal the exact external event awaited by a paused workflow run */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          runId: string;
+        };
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': {
+            event: string;
+            /** Format: date-time */
+            resumeAt: string;
+            payload?: unknown;
+          };
+        };
+      };
+      responses: {
+        /** @description Signal accepted; the scheduler will resume the workflow shortly */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['WorkflowRunActionResponse'];
+          };
+        };
+        /** @description Run is not waiting on this event */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/workflows/runs/{runId}/abandon': {
     parameters: {
       query?: never;
@@ -1491,7 +1829,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Abandon a workflow run (mark as failed) */
+    /** Abandon a workflow run (mark as cancelled) */
     post: {
       parameters: {
         query?: never;
@@ -1642,6 +1980,75 @@ export interface paths {
       };
       responses: {
         /** @description Rejected */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['WorkflowRunActionResponse'];
+          };
+        };
+        /** @description Bad request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/workflows/runs/{runId}/respond': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Resolve a paused workflow run with any of the gate's declared decisions */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          runId: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          'application/json': components['schemas']['RespondWorkflowRunBody'];
+        };
+      };
+      responses: {
+        /** @description Responded */
         200: {
           headers: {
             [name: string]: unknown;
@@ -1866,6 +2273,7 @@ export interface paths {
           codebaseId?: string;
           limit?: string;
           mine?: 'true' | 'false';
+          open?: 'true' | 'false';
         };
         header?: never;
         path?: never;
@@ -2246,7 +2654,7 @@ export interface paths {
     };
     /**
      * List a run's artifact files
-     * @description Walks the run's artifact directory and returns relative file paths with size + mtime. Drives the console Artifacts tab. Returns `{ files: [] }` when the run has no codebase or the codebase name is not in `owner/repo` form.
+     * @description Walks the run's artifact directory and returns relative file paths with size + mtime. Drives the console Artifacts tab. Resolves for every project kind — `owner/repo`, `_local/<basename>`, and `_folder/<slug>` — preferring the run's persisted `output_root` and re-deriving from the codebase when it is absent or no longer inside ARCHON_HOME. Returns `{ files: [] }` only when the location resolved and the run genuinely wrote nothing; returns 404 when the output location cannot be resolved at all.
      */
     get: {
       parameters: {
@@ -2469,6 +2877,67 @@ export interface paths {
     };
     trace?: never;
   };
+  '/api/config/aliases': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Update @custom model aliases
+     * @description Writes the `aliases:` config to ~/.archon/config.yaml. Ungated (works on solo installs). Per-alias merge; a `null` alias value unsets it.
+     */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['UpdateAliasesBody'];
+        };
+      };
+      responses: {
+        /** @description Updated configuration */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['ConfigResponse'];
+          };
+        };
+        /** @description Invalid alias name, unknown provider, or invalid effort */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    trace?: never;
+  };
   '/api/providers': {
     parameters: {
       query?: never;
@@ -2493,6 +2962,93 @@ export interface paths {
           };
           content: {
             'application/json': components['schemas']['ProviderListResponse'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/providers/pi/models': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Pi's model catalog (cost/reasoning metadata for the tier picker)
+     * @description Best-effort hint surface: returns `{ models: [] }` when the Pi catalog cannot be loaded, never an error — tier/alias saves must not depend on it.
+     */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Pi model catalog (metadata only) */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['PiModelListResponse'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/providers/opencode/credentials': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Introspect OpenCode's backend providers and auth state
+     * @description Proxies the embedded OpenCode server's provider introspection (catalog, env var names, install-wide connected state). Heavyweight: starts the embedded server when not already running — call on demand from the settings card, never on passive page load (#1955).
+     */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description OpenCode backend providers (metadata only, no secrets) */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['OpencodeCredentialListResponse'];
+          };
+        };
+        /** @description Embedded OpenCode runtime unavailable */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
           };
         };
       };
@@ -2637,6 +3193,52 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    DagNodeSseEvent: {
+      /** @enum {string} */
+      type: 'dag_node';
+      runId: string;
+      nodeId: string;
+      name: string;
+      /** @enum {string} */
+      status: 'running' | 'completed' | 'failed' | 'skipped';
+      duration?: number;
+      error?: string;
+      reason?: components['schemas']['NodeSkipReason'];
+      cause?: components['schemas']['SkipCause'];
+      timestamp: number;
+    };
+    /** @enum {string} */
+    NodeSkipReason:
+      | 'prior_success'
+      | 'when_condition'
+      | 'when_condition_parse_error'
+      | 'trigger_rule'
+      | 'timeout';
+    SkipCause:
+      | {
+          /** @enum {string} */
+          kind: 'condition';
+          expr: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'condition_parse_error';
+          expr: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'timeout';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'upstream_failed';
+          origin: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'upstream_skipped';
+          origin: string;
+        };
     AuthStatusResponse: {
       enabled: boolean;
       /** @enum {string} */
@@ -2673,12 +3275,31 @@ export interface components {
       connections: components['schemas']['ProviderKeyConnection'][];
       available: string[];
       subscriptionAvailable: string[];
+      agents: components['schemas']['AgentCredentials'][];
     };
     ProviderKeyConnection: {
       provider: string;
       /** @enum {string} */
       kind: 'api_key' | 'oauth';
       label: string | null;
+    };
+    AgentCredentials: {
+      id: string;
+      displayName: string;
+      /** @enum {string} */
+      catalog: 'static' | 'dynamic';
+      ready: boolean;
+      credentials: components['schemas']['AgentCredentialStatus'][];
+    };
+    AgentCredentialStatus: {
+      vendor: string;
+      displayName: string;
+      kinds: ('api_key' | 'subscription' | 'ambient')[];
+      /** @enum {string|null} */
+      connected: 'api_key' | 'oauth' | null;
+      subscriptionAvailable: boolean;
+      installEnv: boolean;
+      ambientConfigured?: boolean;
     };
     ProviderKeySetResponse: {
       success: boolean;
@@ -2716,6 +3337,41 @@ export interface components {
     ProviderOAuthPollBody: {
       sessionId: string;
       code?: string;
+    };
+    UserAiPrefs: {
+      tiers?: components['schemas']['UserTiersConfig'];
+      aliases?: {
+        [key: string]: components['schemas']['TierEntry'];
+      };
+      defaultProvider?: string;
+      defaultModel?: string;
+    };
+    UserTiersConfig: {
+      small?: components['schemas']['TierEntry'];
+      medium?: components['schemas']['TierEntry'];
+      large?: components['schemas']['TierEntry'];
+    };
+    TierEntry: {
+      provider: string;
+      model: string;
+      /** @enum {string} */
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
+    };
+    UpdateUserTiersBody: {
+      tiers: {
+        small?: components['schemas']['TierEntry'] & unknown;
+        medium?: components['schemas']['TierEntry'] & unknown;
+        large?: components['schemas']['TierEntry'] & unknown;
+      };
+    };
+    UpdateUserAliasesBody: {
+      aliases: {
+        [key: string]: components['schemas']['TierEntry'] & unknown;
+      };
+    };
+    UpdateUserDefaultBody: {
+      provider: string | null;
+      model?: string | null;
     };
     ConversationListResponse: components['schemas']['Conversation'][];
     Conversation: {
@@ -2777,6 +3433,8 @@ export interface components {
       default_cwd: string;
       default_branch: string | null;
       ai_assistant_type: string;
+      /** @enum {string} */
+      kind: 'repo' | 'folder';
       commands: {
         [key: string]: {
           path: string;
@@ -2813,6 +3471,7 @@ export interface components {
     WorkflowListEntry: {
       workflow: components['schemas']['WorkflowDefinition'];
       source: components['schemas']['WorkflowSource'];
+      parseWarnings?: string[];
     };
     WorkflowDefinition: {
       name: string;
@@ -2820,27 +3479,20 @@ export interface components {
       provider?: string;
       model?: string;
       /** @enum {string} */
-      modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+      modelReasoningEffort?:
+        | 'minimal'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | 'ultra'
+        | 'persistent';
       /** @enum {string} */
       webSearchMode?: 'disabled' | 'cached' | 'live';
-      additionalDirectories?: string[];
       interactive?: boolean;
       /** @enum {string} */
-      effort?: 'low' | 'medium' | 'high' | 'max';
-      thinking?:
-        | {
-            /** @enum {string} */
-            type: 'adaptive';
-          }
-        | {
-            /** @enum {string} */
-            type: 'enabled';
-            budgetTokens?: number;
-          }
-        | {
-            /** @enum {string} */
-            type: 'disabled';
-          };
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
       fallbackModel?: string;
       betas?: string[];
       sandbox?: {
@@ -2877,22 +3529,46 @@ export interface components {
       worktree?: {
         enabled?: boolean;
       };
+      container?: {
+        enabled?: boolean;
+        /** @enum {string} */
+        write_back?: 'approve' | 'auto';
+      };
+      evidence_policy?: {
+        required: boolean;
+      };
       mutates_checkout?: boolean;
       persist_sessions?: boolean;
       tags?: string[];
       requires?: 'github'[];
+      inputs?: {
+        [key: string]: {
+          required?: boolean;
+          default?: unknown;
+          description?: string;
+        };
+      };
+      returns?: string;
+      outcome_field?: string;
+      deprecated?: {
+        message: string;
+      };
       nodes: components['schemas']['DagNode'][];
     };
     DagNode: {
       id: string;
+      description?: string;
       depends_on?: string[];
       when?: string;
       /** @enum {string} */
       trigger_rule?: 'all_success' | 'one_success' | 'none_failed_min_one_success' | 'all_done';
       model?: string;
       provider?: string;
-      /** @enum {string} */
-      context?: 'fresh' | 'shared';
+      context?:
+        | ('fresh' | 'shared')
+        | {
+            resume: string;
+          };
       output_format?: {
         [key: string]: unknown;
       };
@@ -3067,25 +3743,19 @@ export interface components {
           maxTurns?: number;
         };
       };
+      pi?: {
+        enableExtensions?: boolean;
+        interactive?: boolean;
+        extensionFlags?: {
+          [key: string]: boolean | string;
+        };
+      };
       /** @enum {string} */
-      effort?: 'low' | 'medium' | 'high' | 'max';
-      thinking?:
-        | {
-            /** @enum {string} */
-            type: 'adaptive';
-          }
-        | {
-            /** @enum {string} */
-            type: 'enabled';
-            budgetTokens?: number;
-          }
-        | {
-            /** @enum {string} */
-            type: 'disabled';
-          };
+      effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'persistent';
       maxBudgetUsd?: number;
       systemPrompt?: string;
       fallbackModel?: string;
+      settingSources?: ('project' | 'user')[];
       betas?: string[];
       sandbox?: {
         enabled?: boolean;
@@ -3119,35 +3789,87 @@ export interface components {
         [key: string]: unknown;
       };
       always_run?: boolean;
+      mutates_checkout?: boolean;
       persist_session?: boolean;
       output_type?: string;
       command?: string;
       prompt?: string;
       bash?: string;
+      timeout?: number;
+      /** @enum {string} */
+      on_timeout?: 'skip';
       loop?: {
-        prompt: string;
-        until: string;
+        until?: string;
         max_iterations: number;
         /** @default false */
         fresh_context: boolean;
         until_bash?: string;
         interactive?: boolean;
         gate_message?: string;
+        signal_completes?: boolean;
+        prompt?: string;
+        command?: string;
+        until_field?: string;
+      };
+      loop_group?: {
+        until?: string;
+        max_iterations: number;
+        /** @default false */
+        fresh_context: boolean;
+        until_bash?: string;
+        interactive?: boolean;
+        gate_message?: string;
+        signal_completes?: boolean;
+        nodes: components['schemas']['DagNode'][];
       };
       approval?: {
         message: string;
+        decisions?: {
+          id: string;
+          label?: string;
+        }[];
         capture_response?: boolean;
         on_reject?: {
           prompt: string;
           max_attempts?: number;
         };
       };
+      wait?:
+        | {
+            duration_ms: number;
+          }
+        | {
+            until: string;
+          }
+        | {
+            event: string;
+            deadline_ms: number;
+          }
+        | {
+            attention: string;
+          };
       cancel?: string;
+      include?: string;
+      workflow?: string;
+      input?: string;
+      /** @enum {string} */
+      isolation?: 'inherit' | 'worktree';
+      fan_out?: {
+        items: string;
+        as?: string;
+        /** @default 5 */
+        max_parallel: number;
+        /**
+         * @default all_done
+         * @enum {string}
+         */
+        join: 'all_success' | 'all_done' | 'first_success';
+      };
       script?: string;
       /** @enum {string} */
       runtime?: 'bun' | 'uv';
       deps?: string[];
-      timeout?: number;
+      with?: unknown;
     };
     /** @enum {string} */
     WorkflowSource: 'project' | 'bundled' | 'global';
@@ -3178,19 +3900,23 @@ export interface components {
       codebase_id: string | null;
       /** @enum {string} */
       status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+      /** @enum {string|null} */
+      outcome: 'succeeded' | 'failed' | null;
       user_message: string;
-      metadata: {
-        [key: string]: unknown;
-      };
+      metadata: components['schemas']['WorkflowRunMetadata'];
       started_at: string;
       completed_at: string | null;
       last_activity_at: string | null;
       working_path: string | null;
       user_id: string | null;
+      parent_run_id: string | null;
+      adopted_from_run_id: string | null;
+      output_root: string | null;
       codebase_name: string | null;
       platform_type: string | null;
       worker_platform_id: string | null;
       parent_platform_id: string | null;
+      active_nodes: string[];
       current_step_name: string | null;
       total_steps: number | null;
       /** @enum {string|null} */
@@ -3199,6 +3925,96 @@ export interface components {
       agents_failed: number | null;
       agents_total: number | null;
     };
+    WorkflowRunMetadata: {
+      wait?: components['schemas']['WorkflowWaitContext'];
+    } & {
+      [key: string]: unknown;
+    };
+    WorkflowWaitContext:
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'time';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'event';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+          event: string;
+          /** Format: date-time */
+          signaledAt?: string;
+          payload?: unknown;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'node';
+          nodeId: string;
+          /** @enum {string} */
+          kind: 'attention';
+          /** Format: date-time */
+          waitingSince: string;
+          message: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'time';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'event';
+          /** Format: date-time */
+          waitingSince: string;
+          /** Format: date-time */
+          resumeAt: string;
+          event: string;
+          /** Format: date-time */
+          signaledAt?: string;
+          payload?: unknown;
+        }
+      | {
+          /** @enum {string} */
+          owner: 'loop_group';
+          nodeId: string;
+          bodyWaitId: string;
+          iteration: number;
+          sessionId: string | null;
+          sessionProvider: string | null;
+          /** @enum {string} */
+          kind: 'attention';
+          /** Format: date-time */
+          waitingSince: string;
+          message: string;
+        };
     CancelWorkflowRunResponse: {
       success: boolean;
       message: string;
@@ -3212,6 +4028,10 @@ export interface components {
     };
     RejectWorkflowRunBody: {
       reason?: string;
+    };
+    RespondWorkflowRunBody: {
+      decision: string;
+      text?: string;
     };
     ResetWorkflowNodeSessionsResponse: {
       success: boolean;
@@ -3228,16 +4048,20 @@ export interface components {
       codebase_id: string | null;
       /** @enum {string} */
       status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+      outcome: components['schemas']['WorkflowRunOutcome'];
       user_message: string;
-      metadata: {
-        [key: string]: unknown;
-      };
+      metadata: components['schemas']['WorkflowRunMetadata'];
       started_at: string;
       completed_at: string | null;
       last_activity_at: string | null;
       working_path: string | null;
       user_id: string | null;
+      parent_run_id: string | null;
+      adopted_from_run_id: string | null;
+      output_root: string | null;
     };
+    /** @enum {string|null} */
+    WorkflowRunOutcome: 'succeeded' | 'failed' | null;
     WorkflowRunByWorkerResponse: {
       run: components['schemas']['WorkflowRun'];
     };
@@ -3246,6 +4070,111 @@ export interface components {
         worker_platform_id?: string;
         parent_platform_id?: string;
         conversation_platform_id: string | null;
+        terminal_record: {
+          run_id: string;
+          /** @enum {string} */
+          status: 'completed' | 'failed' | 'cancelled';
+          /** @enum {string|null} */
+          outcome: 'succeeded' | 'failed' | null;
+          error: string | null;
+          first_failed_node: string | null;
+          nodes: {
+            node_id: string;
+            /** @enum {string} */
+            state: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+            error?: string;
+            /** @enum {string} */
+            reason?:
+              | 'prior_success'
+              | 'when_condition'
+              | 'when_condition_parse_error'
+              | 'trigger_rule'
+              | 'timeout';
+            cause?:
+              | {
+                  /** @enum {string} */
+                  kind: 'condition';
+                  expr: string;
+                }
+              | {
+                  /** @enum {string} */
+                  kind: 'condition_parse_error';
+                  expr: string;
+                }
+              | {
+                  /** @enum {string} */
+                  kind: 'timeout';
+                }
+              | {
+                  /** @enum {string} */
+                  kind: 'upstream_failed';
+                  origin: string;
+                }
+              | {
+                  /** @enum {string} */
+                  kind: 'upstream_skipped';
+                  origin: string;
+                };
+          }[];
+          returns:
+            | {
+                /** @enum {string} */
+                availability: 'available';
+                node_id: string;
+                value?: unknown;
+              }
+            | {
+                /** @enum {string} */
+                availability: 'unavailable';
+                node_id: string | null;
+                /** @enum {string} */
+                reason:
+                  | 'not_declared'
+                  | 'graph_unavailable'
+                  | 'node_not_completed'
+                  | 'output_not_persisted';
+              }
+            | {
+                /** @enum {string} */
+                availability: 'truncated';
+                node_id: string;
+                spill_path: string | null;
+                original_bytes: number | null;
+              };
+          artifacts: {
+            root: string | null;
+            files: {
+              path: string;
+              size: number;
+              metadata?: {
+                nodeId: string;
+                outputType: string;
+                loopGroupPath?: {
+                  groupId: string;
+                  iteration: number;
+                }[];
+                path: string;
+                runId: string;
+                /** Format: date-time */
+                producedAt: string;
+                size: number;
+                sessionId?: string;
+              };
+            }[];
+            limitations: {
+              path: string;
+              /** @enum {string} */
+              kind:
+                | 'missing'
+                | 'unreadable'
+                | 'invalid_metadata'
+                | 'link_excluded'
+                | 'unsupported_entry'
+                | 'root_unavailable';
+              code?: string;
+            }[];
+          };
+        } | null;
       };
       events: components['schemas']['WorkflowEvent'][];
     };
@@ -3260,6 +4189,7 @@ export interface components {
       };
       /** Format: date-time */
       created_at: string;
+      event_order?: number | null;
     };
     ValidateWorkflowResponse: {
       valid: boolean;
@@ -3327,6 +4257,9 @@ export interface components {
       };
       tiers?: components['schemas']['TiersConfig'];
       tierDefaults?: components['schemas']['TiersConfig'];
+      aliases?: {
+        [key: string]: components['schemas']['TierEntry'];
+      };
     };
     ProviderDefaults: {
       [key: string]: unknown;
@@ -3335,12 +4268,6 @@ export interface components {
       small?: components['schemas']['TierEntry'];
       medium?: components['schemas']['TierEntry'];
       large?: components['schemas']['TierEntry'];
-    };
-    TierEntry: {
-      provider: string;
-      model: string;
-      effort?: string;
-      thinking?: unknown;
     };
     UpdateAssistantConfigBody: {
       assistant?: string;
@@ -3355,6 +4282,11 @@ export interface components {
         large?: components['schemas']['TierEntry'] & unknown;
       };
     };
+    UpdateAliasesBody: {
+      aliases: {
+        [key: string]: components['schemas']['TierEntry'] & unknown;
+      };
+    };
     ProviderListResponse: {
       providers: components['schemas']['ProviderInfo'][];
     };
@@ -3363,9 +4295,20 @@ export interface components {
       displayName: string;
       capabilities: components['schemas']['ProviderCapabilities'];
       builtIn: boolean;
+      effortLevels?: (
+        | 'minimal'
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max'
+        | 'ultra'
+        | 'persistent'
+      )[];
     };
     ProviderCapabilities: {
       sessionResume: boolean;
+      sessionFork?: boolean;
       mcp: boolean;
       hooks: boolean;
       skills: boolean;
@@ -3374,9 +4317,38 @@ export interface components {
       envInjection: boolean;
       costControl: boolean;
       effortControl: boolean;
-      thinkingControl: boolean;
       fallbackModel: boolean;
       sandbox: boolean;
+    };
+    PiModelListResponse: {
+      models: components['schemas']['PiModelInfo'][];
+    };
+    PiModelInfo: {
+      ref: string;
+      provider: string;
+      id: string;
+      name: string;
+      reasoning: boolean;
+      cost: {
+        input: number;
+        output: number;
+      };
+      contextWindow: number;
+    };
+    OpencodeCredentialListResponse: {
+      providers: components['schemas']['OpencodeCredentialProvider'][];
+    };
+    OpencodeCredentialProvider: {
+      id: string;
+      name: string;
+      env: string[];
+      connected: boolean;
+      modelCount: number;
+      authMethods: {
+        /** @enum {string} */
+        type: 'oauth' | 'api';
+        label: string;
+      }[];
     };
     CodebaseEnvironmentsResponse: {
       environments: components['schemas']['IsolationEnvironment'][];
@@ -3400,7 +4372,14 @@ export interface components {
       runningWorkflows: number;
       version?: string;
       is_docker: boolean;
+      is_wsl: boolean;
+      wsl_distro?: string;
       activePlatforms?: string[];
+      schema?: {
+        createdAppVersion: string | null;
+        appVersion: string;
+        appliedAt: string | null;
+      };
     };
     UpdateCheckResponse: {
       updateAvailable: boolean;

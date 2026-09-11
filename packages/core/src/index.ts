@@ -9,6 +9,14 @@
  * - Utility functions
  */
 
+export {
+  EFFORT_LADDER,
+  clampEffort,
+  isEffortRung,
+  type AssertNever,
+  type EffortRung,
+} from './effort';
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -39,10 +47,12 @@ export {
   getDialect,
   getDatabaseType,
   getDbNotificationListener,
+  getSchemaVersion,
   closeDatabase,
   resetDatabase,
 } from './db/connection';
 export type { IDatabase, SqlDialect, DbNotificationListener } from './db/adapters/types';
+export type { SchemaVersionInfo } from './db/schema-version';
 
 // Namespaced db modules for explicit access
 export * as conversationDb from './db/conversations';
@@ -67,6 +77,10 @@ export {
   registerGitHubAppAuthProvider,
 } from './workflows/store-adapter';
 
+// Per-child isolation resolver factory (#2121 slice 2, PR-A)
+export { createChildWorktreeResolver } from './workflows/child-isolation-resolver';
+export type { ChildWorktreeResolverConfig } from './workflows/child-isolation-resolver';
+
 // Workflow Events DB
 export * as workflowEventDb from './db/workflow-events';
 
@@ -79,7 +93,8 @@ export * as isolationOperations from './operations/isolation-operations';
 // =============================================================================
 // Orchestrator
 // =============================================================================
-export { handleMessage } from './orchestrator/orchestrator-agent';
+export { handleMessage, resolveTitleRequest } from './orchestrator/orchestrator-agent';
+export type { TitleRequest } from './orchestrator/orchestrator-agent';
 export {
   buildOrchestratorPrompt,
   buildProjectScopedPrompt,
@@ -90,7 +105,12 @@ export {
 // Handlers
 // =============================================================================
 export { handleCommand, parseCommand } from './handlers/command-handler';
-export { cloneRepository, registerRepository, type RegisterResult } from './handlers/clone';
+export {
+  cloneRepository,
+  registerRepository,
+  registerFolder,
+  type RegisterResult,
+} from './handlers/clone';
 
 // =============================================================================
 // Config
@@ -127,6 +147,35 @@ export {
 
 export { generateAndSetTitle } from './services/title-generator';
 
+export {
+  waitForRunAttention,
+  DEFAULT_ATTENTION_POLL_INTERVAL_MS,
+} from './services/run-attention-watch';
+export type {
+  NonTerminalWorkflowRunStatus,
+  RunWaitResult,
+  RunAttentionWaitOptions,
+} from './services/run-attention-watch';
+
+export {
+  startRunLiveOwner,
+  withRunLiveOwner,
+  watchRunLiveOwner,
+  requestRunLiveOwnerStop,
+  runLiveOwnerPath,
+  canConnectToRunLiveOwner,
+  RunLiveOwnerStopUnavailableError,
+  RUN_LIVE_OWNER_IPC_TIMEOUT_MS,
+  RUN_LIVE_OWNER_CONTROL_HANDOFF_GRACE_MS,
+} from './services/run-live-owner';
+export type {
+  RunLiveOwner,
+  RunLiveOwnerOptions,
+  RunLiveOwnerStopLease,
+  RunLiveOwnerWatch,
+  RunLiveOwnerWatchEvent,
+} from './services/run-live-owner';
+
 // =============================================================================
 // State
 // =============================================================================
@@ -144,6 +193,9 @@ export {
 
 // Conversation lock
 export { ConversationLockManager, type LockAcquisitionResult } from './utils/conversation-lock';
+
+// Webhook delivery dedup
+export { DeliveryDeduplicator } from './utils/delivery-dedup';
 
 // Error formatting
 export { classifyAndFormatError } from './utils/error-formatter';
@@ -169,6 +221,7 @@ export {
   isPerUserGitHubEnabled,
   loadDeviceFlowConfig,
   assertEncryptionKeyAtBoot,
+  resolveGitHubTokenFromEnv,
   connectGithubForUser,
   persistGithubConnection,
   startDeviceFlow,
@@ -241,7 +294,7 @@ export {
   getUserAiPrefs,
   setUserTiers,
   setUserAliases,
-  setUserDefaultProvider,
+  setUserDefault,
   clearUserAiPrefs,
   type UserAiPrefs,
   type UserTiersPatch,
@@ -255,4 +308,4 @@ export { isPathWithinWorkspace, validateAndResolvePath } from './utils/path-vali
 export { getPort } from './utils/port-allocation';
 
 // Worktree sync
-export { syncArchonToWorktree } from './utils/worktree-sync';
+export { resolveWorkflowSourceRoot } from './utils/workflow-source-root';

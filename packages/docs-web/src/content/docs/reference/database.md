@@ -37,6 +37,11 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 
 **No manual migration step is required.** On startup, the Postgres adapter applies the bundled `migrations/000_combined.sql` inside an advisory-lock transaction. The SQL is idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`), so both fresh installs and version upgrades converge automatically — including new tables and columns added in later releases.
 
+Upgrades are verified, not assumed: CI applies the current schema on top of a database built from
+every distinct schema Archon has ever released, re-applies it to confirm idempotence, and compares
+the result against a fresh install — columns, indexes, column comments, constraints and sequences.
+Run the same check yourself against any PostgreSQL with `bun run check:schema-upgrades`.
+
 If schema application fails (permissions, syntax error, network), the process aborts at the first DB operation with the underlying Postgres error logged at `db.pg_schema_init_failed`.
 
 ## Local PostgreSQL via Docker
@@ -72,6 +77,7 @@ The database has 18 tables, all prefixed with `remote_agent_`:
    - Commands stored as JSONB: `{command_name: {path, description}}`
    - AI assistant type per codebase
    - Default working directory
+   - `kind` (`'repo'` | `'folder'`, default `'repo'`) discriminates git-repo projects from non-git folder projects (which run in place, no worktree)
    - Nullable detected default branch, used as branch context for workspace sync when available
 
 2. **`remote_agent_conversations`** - Platform conversation tracking
@@ -92,9 +98,11 @@ The database has 18 tables, all prefixed with `remote_agent_`:
 
 5. **`remote_agent_workflow_runs`** - Workflow execution tracking
    - Tracks active workflows per conversation
-   - Locks concurrent execution per `working_path`: a second dispatch on a path with an active run (status `pending`/`running`/`paused`) is auto-cancelled with an actionable message. Stale `pending` rows older than 5 minutes are treated as orphaned and ignored.
+   - Locks concurrent execution per `working_path`: a second dispatch on a path with an active run (status `pending`/`running`/`paused`) is auto-cancelled with an actionable message. Stale `pending` rows older than 5 minutes are treated as orphaned and ignored. A `workflow:` sub-run shares its parent's checkout unless the node declares `isolation: worktree`, so the path-lock excludes both the run's ancestor chain and its descendants (via `parent_run_id`) — a child never contends with its own parent. Siblings are **not** excluded.
    - Stores workflow state, step progress, and parent conversation linkage
    - Nullable `user_id` records which user triggered the run
+   - Nullable `parent_run_id` (#2121 Phase 2) — self-referential FK (`ON DELETE SET NULL`) linking a `workflow:` sub-run to the run that spawned it; null for top-level runs. Makes the run tree walkable (`findChildRuns`/`getRunAncestry`) for the abandon cascade and cost roll-up.
+   - `conversation_id` cascades on conversation delete: a hard `DELETE` of a conversation would erase its run rows and silently drop the live-run cleanup pin for their isolation environments (#2868). Soft delete is the only supported path — a future hard-delete must resolve live runs first.
 
 6. **`remote_agent_workflow_events`** - Step-level workflow event log
    - Records step transitions, artifacts, and errors per workflow run
@@ -128,6 +136,7 @@ The database has 18 tables, all prefixed with `remote_agent_`:
 11. **`remote_agent_workflow_node_sessions`** - Per-node provider session IDs persisted across workflow re-runs
     - Opt-in via `persist_session`; keyed by `(workflow_name, node_id, scope_key, provider)`
     - `scope_key` is typically the conversation UUID
+    - No FK on `scope_key`, so a conversation delete does not cascade here. Soft delete plus a never-reused UUID makes the leftovers harmless; a future hard-delete must delete by `scope_key` itself — the mirror of the cascade caveat on `remote_agent_workflow_runs` above.
 
 12. **`remote_agent_user_github_tokens`** - Per-user GitHub device-flow tokens
     - Encrypted at rest (AES-256-GCM); one row per Archon user (`UNIQUE(user_id)`), cascades on user deletion
@@ -138,9 +147,9 @@ The database has 18 tables, all prefixed with `remote_agent_`:
     - `kind` records `api_key` vs `oauth`; resolved + injected into the user's runs/chat env at execution time
     - `provider` holds **vendor-canonical** credential ids (`anthropic`, `openai`, `github-copilot`, plus Pi backend vendors) — legacy `claude`/`codex`/`copilot` rows are renamed by an idempotent startup data fix (the vendor row wins when both exist)
 
-14. **`remote_agent_user_ai_prefs`** - Per-user AI preferences (personal model tiers, `@custom` aliases, default assistant)
+14. **`remote_agent_user_ai_prefs`** - Per-user AI preferences (personal model tiers, `@custom` aliases, default assistant + default chat model)
     - NON-encrypted (model names aren't secrets); one row per user (`UNIQUE(user_id)`), cascades on user deletion
-    - `tiers` / `aliases` are JSON-as-TEXT; folded into model resolution as the highest-precedence layer. Resolution follows the **acting user**: workflow runs use the run starter; chat turns use the message **sender** (the conversation creator's row is only a fallback when no sender identity resolves)
+    - `tiers` / `aliases` are JSON-as-TEXT; folded into model resolution as the highest-precedence layer. `default_model` pins the user's direct-chat model (written atomically with `default_provider`; applied only when the effective chat provider matches — workflows still resolve the `large` tier). Resolution follows the **acting user**: workflow runs use the run starter; chat turns use the message **sender** (the conversation creator's row is only a fallback when no sender identity resolves)
     - Editable via the console "Just me" scope, `archon ai … --scope user`, or `/api/auth/me/ai-prefs*`
 
 15–18. **`remote_agent_auth_user` / `remote_agent_auth_session` / `remote_agent_auth_account` / `remote_agent_auth_verification`** - Better Auth tables for opt-in web login
@@ -176,4 +185,4 @@ The database has 18 tables, all prefixed with `remote_agent_`:
 | `022_workflow_node_sessions.sql` | Per-node provider session persistence |
 | `023_add_default_branch_to_codebases.sql` | Detected default branch on codebases |
 
-> The `remote_agent_users.role` column and the four `remote_agent_auth_*` Better Auth tables (opt-in web login) are applied inline in `000_combined.sql` rather than as numbered migrations, and converge on startup via the idempotent schema apply.
+> The `remote_agent_codebases.kind` column (project `'repo'` | `'folder'` discriminator, commented "From migration 024"), the `remote_agent_users.role` column, and the four `remote_agent_auth_*` Better Auth tables (opt-in web login) are applied inline in `000_combined.sql` rather than as numbered migrations, and converge on startup via the idempotent schema apply.

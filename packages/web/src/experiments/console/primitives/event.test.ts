@@ -195,6 +195,32 @@ describe('toRunEvent — approvals (server writes approval_requested/approval_re
   });
 });
 
+describe('toRunEvent — deprecation notice (#2781)', () => {
+  test('workflow_deprecation_notice renders data.notice as text', () => {
+    const e = toRunEvent(
+      raw({
+        event_type: 'workflow_deprecation_notice',
+        data: {
+          workflowName: 'archon-fix',
+          notice: 'This workflow is deprecated. Switch to the sdlc pack instead.',
+        },
+      })
+    );
+    expect(e.kind).toBe('text');
+    if (e.kind !== 'text') throw new Error('unreachable');
+    expect(e.content).toBe('This workflow is deprecated. Switch to the sdlc pack instead.');
+  });
+
+  test('a notice-less payload falls back to a generic line, never raw JSON', () => {
+    const e = toRunEvent(
+      raw({ event_type: 'workflow_deprecation_notice', data: { workflowName: 'archon-fix' } })
+    );
+    expect(e.kind).toBe('text');
+    if (e.kind !== 'text') throw new Error('unreachable');
+    expect(e.content).toBe('⚠️ This workflow is deprecated.');
+  });
+});
+
 describe('toRunEvent — error & workflow lifecycle', () => {
   test('error prefers the `error` key over `message`', () => {
     const e = toRunEvent(
@@ -414,5 +440,30 @@ describe('foldNodeRuns', () => {
     ]);
     expect(runs).toHaveLength(1);
     expect(runs[0]?.nodeId).toBe('plan');
+  });
+});
+
+describe('toRunEvent — container lifecycle (DB rows)', () => {
+  test('container_created → system event with the container id', () => {
+    const e = toRunEvent(
+      raw({
+        event_type: 'container_created',
+        step_name: 'container',
+        data: { containerId: 'cabbc1f406f6abcdef' },
+      })
+    );
+    expect(e.kind).toBe('system');
+    if (e.kind === 'system') {
+      expect(e.label).toBe('Container created');
+      expect(e.detail).toBe('cabbc1f406f6'); // 12-char short id
+    }
+  });
+
+  test('container_destroyed → system event', () => {
+    const e = toRunEvent(
+      raw({ event_type: 'container_destroyed', step_name: 'container', data: {} })
+    );
+    expect(e.kind).toBe('system');
+    if (e.kind === 'system') expect(e.label).toBe('Container removed');
   });
 });

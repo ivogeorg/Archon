@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, dirname } from 'node:path';
 
-const artifactsDir = process.env['ARTIFACTS_DIR'] ?? '';
+const artifactsDir = process.env.ARTIFACTS_DIR ?? '';
 if (!artifactsDir) {
   process.stderr.write('ARTIFACTS_DIR env var is required\n');
   process.exit(1);
@@ -21,8 +21,8 @@ if (!existsSync(entryPath)) {
 }
 
 interface MarketplaceEntry {
-  sourceUrl: string;
-  sha: string;
+  sourceUrl?: string;
+  sha?: string;
 }
 
 const entry = JSON.parse(readFileSync(entryPath, 'utf8')) as MarketplaceEntry;
@@ -34,9 +34,24 @@ mkdirSync(sourceDir, { recursive: true });
 const errors: string[] = [];
 const files: string[] = [];
 
+// Guard: sourceUrl/sha are required. If missing, output empty result so
+// downstream nodes proceed gracefully (e.g., PR without a marketplace entry).
+if (!sourceUrl || !sha) {
+  const missing: string[] = [];
+  if (!sourceUrl) missing.push('sourceUrl');
+  if (!sha) missing.push('sha');
+  const msg = `entry.json is missing required field(s): ${missing.join(', ')}. ` +
+    'This PR likely does not add a marketplace entry with source files. ' +
+    'Skipping source fetch.';
+  process.stderr.write(msg + '\n');
+  errors.push(msg);
+  console.log(JSON.stringify({ files, errors }));
+  process.exit(0);
+}
+
 // Parse GitHub blob/tree URL into owner/repo/path
-const blobMatch = sourceUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/[^/]+\/(.+)$/);
-const treeMatch = sourceUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/[^/]+\/(.+)$/);
+const blobMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/[^/]+\/(.+)$/.exec(sourceUrl);
+const treeMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/[^/]+\/(.+)$/.exec(sourceUrl);
 
 function ghApi(path: string): string {
   try {
@@ -61,7 +76,7 @@ function fetchContents(owner: string, repo: string, dirPath: string, relativePre
   const raw = ghApi(apiPath);
   if (!raw) return;
 
-  const entries = JSON.parse(raw) as Array<{ type: string; name: string; path: string }>;
+  const entries = JSON.parse(raw) as { type: string; name: string; path: string }[];
   for (const item of entries) {
     const relativePath = relativePrefix ? `${relativePrefix}/${item.name}` : item.name;
     if (item.type === 'dir') {

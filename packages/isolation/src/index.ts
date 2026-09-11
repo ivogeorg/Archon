@@ -7,6 +7,7 @@ export type {
   PRIsolationRequest,
   ReviewIsolationRequest,
   ThreadIsolationRequest,
+  TaskBranchSelection,
   TaskIsolationRequest,
   IsolationRequest,
   AdoptedWorktreeMetadata,
@@ -28,9 +29,27 @@ export type {
   ResolveRequest,
   ResolutionMethod,
   IsolationResolution,
+  ExecutionContext,
+  WriteBackFinalizeResult,
+  WriteBackApplySummary,
+  BackendPrepareRequest,
+  PreparedEnv,
+  IIsolationBackend,
+  ContainerBackendConfig,
 } from './types';
 
-export { isPRIsolationRequest } from './types';
+export { isPRIsolationRequest, CONTAINER_LABELS } from './types';
+
+// --- Backend seam (folder projects) ---
+export { resolveFolderBackend } from './backend-router';
+export type { ResolveFolderBackendOptions } from './backend-router';
+export { InPlaceBackend } from './backends/in-place';
+export { ContainerBackend } from './backends/container';
+export type { ContainerBackendDeps } from './backends/container';
+
+// --- Container backend primitives (docker CLI wrapper) ---
+export { dockerCli, dockerPreflight, extractDockerError } from './container/docker-exec';
+export type { DockerRunner, DockerExecOptions, DockerExecResult } from './container/docker-exec';
 
 // --- Store ---
 export type { IIsolationStore } from './store';

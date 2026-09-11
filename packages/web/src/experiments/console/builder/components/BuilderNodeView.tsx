@@ -2,7 +2,7 @@
  * Custom xyflow node renderer for builder nodes. Follows the production
  * `DagNodeComponent` layout (left color stripe, badge, label, content
  * preview) restyled with console tokens; the stripe and badge colors come
- * from the `--node-<variant>` CSS variables so all seven variants render a
+ * from the `--node-<variant>` CSS variables so all eight variants render a
  * distinct identity without hard-coded hex.
  */
 import { memo, type CSSProperties, type ReactElement, type ReactNode } from 'react';
@@ -23,9 +23,17 @@ export function contentPreview(node: BuilderNode): string {
     case 'script':
       return node.data.script.split('\n')[0] ?? '';
     case 'loop':
-      return node.data.prompt.split('\n')[0] ?? '';
+      // Command-backed loops preview the command name (same as command nodes).
+      return node.data.command ?? node.data.prompt?.split('\n')[0] ?? '';
     case 'approval':
       return node.data.message.split('\n')[0] ?? '';
+    case 'wait':
+      return (
+        node.data.attention ??
+        node.data.event ??
+        node.data.until ??
+        `${String(node.data.duration_ms ?? 0)} ms`
+      );
     case 'cancel':
       return node.data.reason.split('\n')[0] ?? '';
   }

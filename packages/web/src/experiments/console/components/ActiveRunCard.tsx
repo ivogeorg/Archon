@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 import { StatusStrip } from './StatusStrip';
 import { LiveDot } from './LiveDot';
@@ -7,8 +7,12 @@ import { ApprovalPanel } from './ApprovalPanel';
 import { ApprovalContext } from './ApprovalContext';
 import type { Run } from '../primitives/run';
 import { shortRunId, formatElapsed, elapsedSince, formatCost } from '../lib/format';
-import { useIsDocker, openInIde } from '../lib/health';
-import { statusTextClass, statusLabel } from '../lib/run-status';
+import { useIsDocker, useIdeEnv, openInIde } from '../lib/health';
+import { statusTextClass, runStatusLabel } from '../lib/run-status';
+import { RunOutcomeBadge } from './RunOutcomeBadge';
+import * as skill from '../skills';
+import { invalidate } from '../store/cache';
+import { K } from '../store/keys';
 
 /** Present + non-empty — narrows `string | null | undefined` to `string`. */
 const hasValue = (v: string | null | undefined): v is string => v != null && v !== '';
@@ -48,11 +52,31 @@ export function ActiveRunCard({
 }: ActiveRunCardProps): ReactElement {
   const navigate = useNavigate();
   const isDocker = useIsDocker();
+  const ideEnv = useIdeEnv();
   const elapsed = formatElapsed(elapsedSince(run.startedAt));
   const canOpen = run.projectId !== null && !run.id.startsWith('demo-');
   const canOpenIde =
     !isDocker && run.workingPath !== null && run.workingPath !== '' && !run.id.startsWith('demo-');
   const showDetailGrid = run.userMessage !== '' || run.status === 'running';
+  const [attentionBusy, setAttentionBusy] = useState<'resume' | 'abandon' | null>(null);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
+
+  const resolveAttention = async (action: 'resume' | 'abandon'): Promise<void> => {
+    setAttentionBusy(action);
+    setAttentionError(null);
+    try {
+      if (!run.id.startsWith('demo-')) {
+        if (action === 'resume') await skill.resumeRun(run.id);
+        else await skill.abandonRun(run.id);
+      }
+      invalidate('runs');
+      invalidate(K.run(run.id));
+    } catch (error: unknown) {
+      setAttentionError(error instanceof Error ? error.message : 'Action failed.');
+    } finally {
+      setAttentionBusy(null);
+    }
+  };
 
   const onCardClick = (): void => {
     if (canOpen) navigate(`/console/p/${run.projectId}/r/${run.id}`);
@@ -105,8 +129,9 @@ export function ActiveRunCard({
           <span
             className={`shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] ${statusTextClass[run.status]}`}
           >
-            {statusLabel[run.status]}
+            {runStatusLabel(run)}
           </span>
+          <RunOutcomeBadge outcome={run.outcome} />
           <span className="mx-1 h-3 w-px shrink-0 bg-border" aria-hidden />
           <span className="text-sm font-medium text-text-primary">{run.workflow}</span>
           <span className="font-mono text-[11px] text-text-tertiary">{shortRunId(run.id)}</span>
@@ -129,7 +154,7 @@ export function ActiveRunCard({
                 type="button"
                 onClick={e => {
                   e.stopPropagation();
-                  if (run.workingPath !== null) openInIde(run.workingPath);
+                  if (run.workingPath !== null) openInIde(run.workingPath, ideEnv);
                 }}
                 title={`Open ${run.workingPath} in IDE`}
                 aria-label="Open in IDE"
@@ -155,10 +180,12 @@ export function ActiveRunCard({
                 </span>
               </>
             ) : null}
-            {run.status === 'running' && hasValue(run.currentNode) ? (
+            {run.status === 'running' && run.activeNodes.length > 0 ? (
               <>
-                <span className="font-mono text-text-tertiary">node</span>
-                <span className="font-mono text-text-primary">{run.currentNode}</span>
+                <span className="font-mono text-text-tertiary">
+                  {run.activeNodes.length === 1 ? 'node' : 'nodes'}
+                </span>
+                <span className="font-mono text-text-primary">{run.activeNodes.join(', ')}</span>
               </>
             ) : null}
             {run.status === 'running' && hasValue(run.lastTool) ? (
@@ -172,6 +199,62 @@ export function ActiveRunCard({
                 </span>
               </>
             ) : null}
+          </div>
+        ) : null}
+
+        {run.status === 'paused' && run.wait != null ? (
+          <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 rounded border border-warning/25 bg-warning/[0.05] px-3 py-2 text-[12px]">
+            <span className="font-mono text-text-tertiary">node</span>
+            <span className="font-mono text-text-primary">{run.wait.nodeId}</span>
+            {run.wait.kind === 'event' && run.wait.event !== undefined ? (
+              <>
+                <span className="font-mono text-text-tertiary">event</span>
+                <span className="font-mono text-text-primary">{run.wait.event}</span>
+              </>
+            ) : null}
+            {run.wait.kind === 'attention' ? (
+              <>
+                <span className="font-mono text-text-tertiary">action</span>
+                <span className="text-text-secondary">{run.wait.message}</span>
+                <span className="font-mono text-text-tertiary">then</span>
+                <span className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={event => {
+                      event.stopPropagation();
+                      void resolveAttention('resume');
+                    }}
+                    disabled={attentionBusy !== null}
+                    className="rounded bg-warning/15 px-2 py-1 font-semibold text-warning hover:bg-warning/25 disabled:opacity-50"
+                  >
+                    {attentionBusy === 'resume' ? 'Resuming…' : 'Resume'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={event => {
+                      event.stopPropagation();
+                      void resolveAttention('abandon');
+                    }}
+                    disabled={attentionBusy !== null}
+                    className="rounded px-2 py-1 text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-50"
+                  >
+                    {attentionBusy === 'abandon' ? 'Abandoning…' : 'Abandon'}
+                  </button>
+                  {attentionError !== null ? (
+                    <span className="font-mono text-error">{attentionError}</span>
+                  ) : null}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="font-mono text-text-tertiary">
+                  {run.wait.kind === 'event' ? 'deadline' : 'resume'}
+                </span>
+                <span className="font-mono text-text-secondary">
+                  {new Date(run.wait.resumeAt).toLocaleString()}
+                </span>
+              </>
+            )}
           </div>
         ) : null}
 
@@ -193,6 +276,22 @@ export function ActiveRunCard({
               <ApprovalPanel run={run} />
             </>
           )
+        ) : null}
+
+        {/* Resolved gate awaiting auto-resume — the run is still 'paused' in the
+            DB for the second or so between approve/reject and the executor
+            flipping it to running. Show a hint instead of stale gate buttons. */}
+        {run.status === 'paused' && run.gateResolved !== null && run.gateResolved !== undefined ? (
+          <div className="mt-2 flex items-center gap-2 rounded border border-border bg-surface-hover/40 px-3 py-2 text-[12px] text-text-secondary">
+            <span aria-hidden className="inline-block animate-pulse leading-none">
+              ▸
+            </span>
+            <span>
+              {run.gateResolved === 'approved'
+                ? 'Approved — resuming…'
+                : 'Rejected — running on-reject rework…'}
+            </span>
+          </div>
         ) : null}
       </div>
     </article>

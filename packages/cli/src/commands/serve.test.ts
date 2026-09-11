@@ -1,7 +1,22 @@
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // Mock @archon/paths BEFORE importing the module under test.
-// This sets BUNDLED_IS_BINARY = false (dev mode) so serveCommand rejects.
+// BUNDLED_IS_BINARY = false puts serveCommand on its source-checkout path, and
+// getSourceWebDistDir is redirected at a temp tree so a test can decide whether
+// `bun run build:web` has been run without depending on this checkout's state.
 const mockLogger = {
   fatal: mock(() => undefined),
   error: mock(() => undefined),
@@ -10,14 +25,34 @@ const mockLogger = {
   debug: mock(() => undefined),
   trace: mock(() => undefined),
 };
+let sourceWebDistDir = '/tmp/test-archon/unset-source-web-dist';
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   getWebDistDir: mock((version: string) => `/tmp/test-archon/web-dist/${version}`),
+  getSourceWebDistDir: mock(() => sourceWebDistDir),
   BUNDLED_IS_BINARY: false,
   BUNDLED_VERSION: 'dev',
+  BUNDLED_WEB_DIST_SHA256: '',
 }));
 
-import { serveCommand, parseChecksum } from './serve';
+// serveCommand reaches the real server through a dynamic import. Stub it so the
+// source-mode tests can read back which dist it was handed without opening a
+// listening socket.
+const startServerCalls: Array<{ webDistPath: string; port?: number }> = [];
+mock.module('@archon/server', () => ({
+  startServer: mock(async (opts: { webDistPath: string; port?: number }) => {
+    startServerCalls.push(opts);
+  }),
+}));
+
+import { trackTempRoots } from '@archon/paths/test-utils';
+import {
+  serveCommand,
+  parseChecksum,
+  parseEmbeddedChecksum,
+  downloadWebDist,
+  resolveTarBin,
+} from './serve';
 
 describe('parseChecksum', () => {
   const validHash = 'a'.repeat(64);
@@ -68,6 +103,485 @@ describe('parseChecksum', () => {
   });
 });
 
+describe('parseEmbeddedChecksum', () => {
+  const validHash = 'b'.repeat(64);
+
+  it('should accept a lowercase 64-char hex checksum', () => {
+    expect(parseEmbeddedChecksum(validHash)).toBe(validHash);
+  });
+
+  it('should trim surrounding whitespace before validation', () => {
+    expect(parseEmbeddedChecksum(`  ${validHash}\n`)).toBe(validHash);
+  });
+
+  it('should reject malformed embedded checksums', () => {
+    expect(() => parseEmbeddedChecksum('not-a-sha')).toThrow('Malformed embedded checksum');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-process tar.gz fixture builder.
+//
+// downloadWebDist shells out to `tar xzf -`, so the fixture it is fed has to be
+// a genuine gzipped tar — but BUILDING that fixture does not need a subprocess.
+// Spawning `tar czf -` here used to make the beforeAll hook the one thing in
+// this file that could hang on a child process, which is exactly how it failed
+// on windows CI (#2306). Emitting the ~1.1 KB ustar archive directly is
+// deterministic, platform-independent, and needs no `tar` on PATH.
+// ---------------------------------------------------------------------------
+
+/** Write ASCII into a fixed-width header field (NUL padding comes from the zeroed buffer). */
+function writeField(header: Uint8Array, offset: number, value: string, width: number): void {
+  header.set(new TextEncoder().encode(value).subarray(0, width), offset);
+}
+
+/** Write a ustar numeric field: zero-padded octal followed by a trailing NUL. */
+function writeOctalField(header: Uint8Array, offset: number, value: number, width: number): void {
+  writeField(header, offset, value.toString(8).padStart(width - 1, '0'), width - 1);
+}
+
+/** One 512-byte ustar header block. `typeflag` is '0' (file) or '5' (directory). */
+function tarHeader(name: string, size: number, typeflag: '0' | '5', mode: number): Uint8Array {
+  const header = new Uint8Array(512);
+  writeField(header, 0, name, 100);
+  writeOctalField(header, 100, mode, 8);
+  writeOctalField(header, 108, 0, 8); // uid
+  writeOctalField(header, 116, 0, 8); // gid
+  writeOctalField(header, 124, size, 12);
+  writeOctalField(header, 136, 0, 12); // mtime — fixed so the fixture is byte-stable
+  header.fill(0x20, 148, 156); // checksum field reads as 8 spaces while summing
+  header[156] = typeflag.charCodeAt(0);
+  writeField(header, 257, 'ustar', 6); // magic (NUL-terminated by the zeroed buffer)
+  writeField(header, 263, '00', 2); // version
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  writeField(header, 148, checksum.toString(8).padStart(6, '0'), 6);
+  header[154] = 0x00;
+  header[155] = 0x20;
+  return header;
+}
+
+/** Concatenate blocks into one buffer. */
+function concatBytes(blocks: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const total = blocks.reduce((sum, block) => sum + block.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const block of blocks) {
+    out.set(block, offset);
+    offset += block.length;
+  }
+  return out;
+}
+
+/**
+ * The exact bytes the fixture claims to carry. Every test that extracts asserts
+ * the file lands with THIS content, not merely that a file exists — a hand-rolled
+ * binary format that nothing validates is a worse trap than the hang it replaced.
+ * A `size` field short by a few bytes, dropped padding, or a missing terminator
+ * all still produce an `index.html` and a `tar` exit 0; only comparing content
+ * catches them.
+ */
+const FIXTURE_INDEX_HTML = '<html>ok</html>';
+
+/** `web/` + `web/index.html`, tarred and gzipped — the shape `archon serve` downloads. */
+function buildWebTarball(indexHtml: string): Uint8Array<ArrayBuffer> {
+  const body = new TextEncoder().encode(indexHtml);
+  const padding = new Uint8Array((512 - (body.length % 512)) % 512);
+  return new Uint8Array(
+    Bun.gzipSync(
+      concatBytes([
+        tarHeader('web/', 0, '5', 0o755),
+        tarHeader('web/index.html', body.length, '0', 0o644),
+        body,
+        padding,
+        new Uint8Array(1024), // two zero blocks terminate the archive
+      ])
+    )
+  );
+}
+
+describe('resolveTarBin', () => {
+  // Windows ships bsdtar at System32\tar.exe, but Git for Windows puts GNU tar
+  // on PATH ahead of it, and GNU tar cannot open a drive-letter operand: it
+  // mangles the `-C C:\Users\...` operand into a colon-escaped path and exits 2.
+  // Leaving the binary to PATH makes extraction depend on which shell launched
+  // Archon, so these cases pin the choice on every host — CI runs them off Windows.
+  const SYSTEM32_TAR = /[/\\]System32[/\\]tar\.exe$/;
+
+  it('pins the Windows system tar when it is present', () => {
+    const probed: string[] = [];
+
+    const bin = resolveTarBin('win32', path => {
+      probed.push(path);
+      return true;
+    });
+
+    expect(bin).not.toBe('tar');
+    expect(bin).toMatch(SYSTEM32_TAR);
+    // The probe must ask about the path it returns, not some other file.
+    expect(probed).toEqual([bin]);
+  });
+
+  it('falls back to PATH when Windows has no bundled tar', () => {
+    // Pre-1803 Windows ships no tar. Returning the absolute path anyway would
+    // spawn a file that does not exist, which is a worse failure than a PATH miss.
+    expect(resolveTarBin('win32', () => false)).toBe('tar');
+  });
+
+  it('leaves the binary to PATH off Windows', () => {
+    const probed: string[] = [];
+
+    const bin = resolveTarBin('linux', path => {
+      probed.push(path);
+      return true;
+    });
+
+    expect(bin).toBe('tar');
+    // No filesystem probe at all — the POSIX `tar` on PATH is the right one.
+    expect(probed).toEqual([]);
+  });
+});
+
+describe('downloadWebDist', () => {
+  let tmpRoot: string;
+  let tarballBytes: Uint8Array;
+  let tarballHash: string;
+  let fetchSpy: ReturnType<typeof spyOn>;
+  let consoleLogSpy: ReturnType<typeof spyOn>;
+
+  beforeAll(() => {
+    // Fixture: a real gzipped tar with one top-level dir holding index.html —
+    // downloadWebDist extracts with --strip-components=1. Built in-process
+    // (see buildWebTarball) rather than by shelling out to `tar czf -`, so the
+    // hook cannot hang on a subprocess (#2306).
+    tmpRoot = mkdtempSync(join(tmpdir(), 'serve-webdist-test-'));
+    tarballBytes = buildWebTarball(FIXTURE_INDEX_HTML);
+    const hasher = new Bun.CryptoHasher('sha256');
+    hasher.update(tarballBytes);
+    tarballHash = hasher.digest('hex');
+  });
+
+  afterAll(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, 'fetch');
+    consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    consoleLogSpy.mockRestore();
+  });
+
+  // The spawn-shape and cleanup assertions ride along here rather than in tests
+  // of their own: each call to downloadWebDist costs a real `tar` spawn, and
+  // spawn count on windows is the whole reason this file gets attention.
+  // SKIPPED ON WINDOWS BY OPERATOR DECISION (#2924). Do not "fix" this by removing
+  // the skip. These two are the only tests that run a real `tar` to a successful
+  // extraction, and they are the two #2924 recorded timing out. The child never
+  // reports exit: phase logging shows 3ms of setup, `extract_spawned`, then silence
+  // until the runner kills it. It is a stall, not a slow extraction, so nothing about
+  // the fixture or the command can shorten it.
+  //
+  // What this costs: on windows we no longer prove end-to-end that the extraction
+  // command works. That proof still runs on ubuntu and macOS, and `resolveTarBin`'s
+  // own tests inject `platform`, so the windows branch stays covered everywhere.
+  //
+  // Why it was taken: the flake was interrupting Archon runs in the sdlc pack, which
+  // is a recurring cost against a hypothetical one — `archon serve` is bounded at 60s
+  // for users regardless. Reversing #2924's standing "never skip on windows" rule was
+  // deliberate and is recorded there.
+  it.skipIf(process.platform === 'win32')(
+    'verifies against the embedded hash without fetching checksums.txt',
+    async () => {
+      fetchSpy.mockImplementation(async () => new Response(tarballBytes));
+      const targetDir = join(tmpRoot, 'target-embedded-ok');
+      const spawnSpy = spyOn(Bun, 'spawn');
+      let extractorStdin: unknown;
+      let extractorBin: string | undefined;
+
+      try {
+        await downloadWebDist('9.9.9', targetDir, tarballHash);
+        // Read before restoring — mockRestore() clears the recorded calls.
+        extractorStdin = (spawnSpy.mock.calls[0]?.[1] as { stdin?: unknown } | undefined)?.stdin;
+        extractorBin = (spawnSpy.mock.calls[0]?.[0] as string[] | undefined)?.[0];
+      } finally {
+        spawnSpy.mockRestore();
+      }
+
+      // Content, not just existence — a truncated or corrupt fixture still yields
+      // an index.html and a `tar` exit 0, so only this assertion catches it.
+      expect(readFileSync(join(targetDir, 'index.html'), 'utf8')).toBe(FIXTURE_INDEX_HTML);
+      // Only the tarball is fetched — checksums.txt must NOT be requested.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('archon-web.tar.gz');
+      // `tar` must inherit a file descriptor. Passing the bytes as `stdin` instead
+      // leaves the parent owning a channel it has to pump and close, and a stalled
+      // pump blocks `tar` forever — the windows hang in #2924. A BunFile is a Blob;
+      // a Uint8Array is not, which is exactly the regression this catches.
+      expect(extractorStdin).toBeInstanceOf(Blob);
+      // Wiring: extraction must spawn the resolved binary, not the bare name. An
+      // exported-but-uncalled resolver leaves Windows on PATH, which is the bug.
+      if (process.platform === 'win32') {
+        expect(extractorBin).toMatch(/[/\\]System32[/\\]tar\.exe$/);
+      } else {
+        expect(extractorBin).toBe('tar');
+      }
+      // The staged archive is ~2 MB in production — it must not survive extraction.
+      expect(existsSync(`${targetDir}.tmp.tar.gz`)).toBe(false);
+    }
+  );
+
+  it('hard-fails on embedded hash mismatch with a clear error', async () => {
+    fetchSpy.mockImplementation(async () => new Response(tarballBytes));
+    const targetDir = join(tmpRoot, 'target-embedded-mismatch');
+    const wrongHash = 'c'.repeat(64);
+
+    await expect(downloadWebDist('9.9.9', targetDir, wrongHash)).rejects.toThrow(
+      `Checksum mismatch: expected ${wrongHash}, got ${tarballHash}`
+    );
+    expect(existsSync(targetDir)).toBe(false);
+    // Still no checksums.txt fetch on the embedded path.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // The mismatch test above cannot reach this path: verification runs before
+  // anything is staged, so it never leaves temp state behind. Checksum-valid
+  // bytes that are not a gzip stream are the only cheap way in — staging happens,
+  // then `tar` exits non-zero.
+  it('leaves nothing behind when tar exits non-zero', async () => {
+    const notAnArchive = new TextEncoder().encode('checksum-valid, but not gzip');
+    const hasher = new Bun.CryptoHasher('sha256');
+    hasher.update(notAnArchive);
+    fetchSpy.mockImplementation(async () => new Response(notAnArchive));
+    const targetDir = join(tmpRoot, 'target-tar-failure');
+
+    await expect(downloadWebDist('9.9.9', targetDir, hasher.digest('hex'))).rejects.toThrow(
+      'tar extraction failed'
+    );
+
+    expect(existsSync(`${targetDir}.tmp.tar.gz`)).toBe(false);
+    expect(existsSync(`${targetDir}.tmp`)).toBe(false);
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
+  // The bound is the only thing between a stuck `tar` and an `archon serve` that
+  // waits forever, so it is proved against a child that genuinely never exits.
+  // A fake subprocess would have to model kill-ends-the-wait, which is the part
+  // worth doubting: this asserts it instead. The extra child is deliberate spawn
+  // cost on windows (#2924) and it is bounded by the thing under test — 250ms,
+  // then killed.
+  it('bounds a stalled extraction, names the timeout, and leaves no partial tree', async () => {
+    fetchSpy.mockImplementation(async () => new Response(tarballBytes));
+    const targetDir = join(tmpRoot, 'target-extract-stall');
+    const tmpDir = `${targetDir}.tmp`;
+    const partialFile = join(tmpDir, 'index.html');
+    const realSpawn = Bun.spawn.bind(Bun);
+    let partialTreeExisted = false;
+    const spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((
+      _command: string[],
+      options: Parameters<typeof Bun.spawn>[1]
+    ) => {
+      // Written here, not by the child, so a half-extracted tree is present
+      // before the stall rather than racing the timer for its own existence.
+      writeFileSync(partialFile, 'half a tree');
+      partialTreeExisted = existsSync(partialFile);
+      return realSpawn([process.execPath, '-e', 'await new Promise(() => {})'], options);
+    }) as unknown as typeof Bun.spawn);
+
+    try {
+      await expect(downloadWebDist('9.9.9', targetDir, tarballHash, 250)).rejects.toThrow(
+        /Timed out extracting the web UI: tar did not finish within 250ms/
+      );
+    } finally {
+      spawnSpy.mockRestore();
+    }
+
+    expect(partialTreeExisted).toBe(true);
+    // Nothing survives the bound: not the half-extracted tree, not the staged
+    // archive, and above all no target dir that the next run would read as a
+    // complete install.
+    expect(existsSync(partialFile)).toBe(false);
+    expect(existsSync(tmpDir)).toBe(false);
+    expect(existsSync(`${targetDir}.tmp.tar.gz`)).toBe(false);
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
+  // SKIPPED ON WINDOWS BY OPERATOR DECISION (#2924). Do not "fix" this by removing
+  // the skip. These two are the only tests that run a real `tar` to a successful
+  // extraction, and they are the two #2924 recorded timing out. The child never
+  // reports exit: phase logging shows 3ms of setup, `extract_spawned`, then silence
+  // until the runner kills it. It is a stall, not a slow extraction, so nothing about
+  // the fixture or the command can shorten it.
+  //
+  // What this costs: on windows we no longer prove end-to-end that the extraction
+  // command works. That proof still runs on ubuntu and macOS, and `resolveTarBin`'s
+  // own tests inject `platform`, so the windows branch stays covered everywhere.
+  //
+  // Why it was taken: the flake was interrupting Archon runs in the sdlc pack, which
+  // is a recurring cost against a hypothetical one — `archon serve` is bounded at 60s
+  // for users regardless. Reversing #2924's standing "never skip on windows" rule was
+  // deliberate and is recorded there.
+  it.skipIf(process.platform === 'win32')(
+    'falls back to remote checksums.txt when the embedded hash is empty',
+    async () => {
+      fetchSpy.mockImplementation(async (url: string | URL | Request) => {
+        if (String(url).includes('checksums.txt')) {
+          return new Response(`${tarballHash}  archon-web.tar.gz\n`);
+        }
+        return new Response(tarballBytes);
+      });
+      const targetDir = join(tmpRoot, 'target-remote-fallback');
+
+      await downloadWebDist('9.9.9', targetDir, '');
+
+      expect(readFileSync(join(targetDir, 'index.html'), 'utf8')).toBe(FIXTURE_INDEX_HTML);
+      // Remote path fetches both checksums.txt and the tarball.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const urls = fetchSpy.mock.calls.map((call: Parameters<typeof fetch>) => String(call[0]));
+      expect(urls.some((url: string) => url.includes('checksums.txt'))).toBe(true);
+    }
+  );
+});
+
+// Structural conformance of the hand-rolled archive, checked against the POSIX
+// ustar spec rather than against the writer itself.
+//
+// The extraction tests above catch a wrong *payload* (a short `size` field
+// truncates the file, which the content assertions see). They do NOT catch a
+// wrong *envelope*: bsdtar happily extracts an archive with no end-of-archive
+// marker and no block padding, so on macOS those corruptions pass silently and
+// would only surface as a platform-specific CI failure — precisely the class of
+// bug this file is being changed to remove. Hence these two.
+describe('buildWebTarball structural conformance', () => {
+  const archive = Bun.gunzipSync(buildWebTarball(FIXTURE_INDEX_HTML));
+
+  it('is a whole number of 512-byte blocks', () => {
+    expect(archive.length % 512).toBe(0);
+  });
+
+  it('ends with the two zero blocks that mark end-of-archive', () => {
+    const terminator = archive.subarray(archive.length - 1024);
+    expect(terminator.length).toBe(1024);
+    expect(terminator.every(byte => byte === 0)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// serveCommand blocks in the foreground until SIGINT/SIGTERM. Raising a real
+// signal here would also reach the test runner, so the tests call the listeners
+// the command registered and drop them — what the signal itself would do — and
+// only ever touch listeners that were not already there.
+// ---------------------------------------------------------------------------
+
+const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
+type ShutdownListener = () => void;
+
+function shutdownListeners(): Map<string, Set<ShutdownListener>> {
+  return new Map(
+    SHUTDOWN_SIGNALS.map(signal => [
+      signal,
+      new Set(process.listeners(signal) as unknown as ShutdownListener[]),
+    ])
+  );
+}
+
+/** Listeners registered since `before` — the ones serveCommand is parked on. */
+function newShutdownListeners(
+  before: Map<string, Set<ShutdownListener>>
+): Array<[(typeof SHUTDOWN_SIGNALS)[number], ShutdownListener]> {
+  const added: Array<[(typeof SHUTDOWN_SIGNALS)[number], ShutdownListener]> = [];
+  for (const signal of SHUTDOWN_SIGNALS) {
+    for (const listener of process.listeners(signal) as unknown as ShutdownListener[]) {
+      if (!before.get(signal)?.has(listener)) added.push([signal, listener]);
+    }
+  }
+  return added;
+}
+
+/** Resolve once the command has started the server and parked on a signal. */
+async function waitForForegroundWait(before: Map<string, Set<ShutdownListener>>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (newShutdownListeners(before).length > 0) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error('serveCommand never reached its foreground wait');
+}
+
+function interruptForegroundWait(before: Map<string, Set<ShutdownListener>>): void {
+  for (const [signal, listener] of newShutdownListeners(before)) {
+    process.removeListener(signal, listener);
+    listener();
+  }
+}
+
+describe('serveCommand in a source checkout', () => {
+  const trackTempRoot = trackTempRoots();
+  let consoleErrorSpy: ReturnType<typeof spyOn>;
+  let fetchSpy: ReturnType<typeof spyOn>;
+  let builtDist: string;
+
+  beforeEach(() => {
+    consoleErrorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    // Any fetch at all would mean the source path tried to download a release.
+    fetchSpy = spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async () => {
+      throw new Error('serveCommand must not download in a source checkout');
+    });
+    startServerCalls.length = 0;
+    builtDist = trackTempRoot(mkdtempSync(join(tmpdir(), 'serve-source-dist-')));
+    writeFileSync(join(builtDist, 'index.html'), '<html>built</html>');
+    sourceWebDistDir = builtDist;
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it('serves the locally built dist on the requested port', async () => {
+    const before = shutdownListeners();
+    const pending = serveCommand({ port: 4321 });
+
+    await waitForForegroundWait(before);
+    expect(startServerCalls).toEqual([{ webDistPath: builtDist, port: 4321 }]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    interruptForegroundWait(before);
+    expect(await pending).toBe(0);
+  });
+
+  it('refuses with a build instruction when the dist has not been built', async () => {
+    sourceWebDistDir = join(builtDist, 'not-built-yet');
+
+    const exitCode = await serveCommand({});
+
+    expect(exitCode).toBe(1);
+    expect(startServerCalls).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const errors = consoleErrorSpy.mock.calls.flat().join('\n');
+    expect(errors).toContain(sourceWebDistDir);
+    expect(errors).toContain('bun run build:web');
+    // The old refusal sent source installs to `bun run dev`, which is a different
+    // thing (every package's dev server, HMR, a held terminal) and is why #3218
+    // was reported. It must not come back.
+    expect(errors).not.toContain('bun run dev');
+  });
+
+  it('refuses --download-only because a source checkout downloads nothing', async () => {
+    const exitCode = await serveCommand({ downloadOnly: true });
+
+    expect(exitCode).toBe(1);
+    expect(startServerCalls).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consoleErrorSpy.mock.calls.flat().join('\n')).toContain(
+      '--download-only is for binary installs'
+    );
+  });
+});
+
 describe('serveCommand', () => {
   let consoleErrorSpy: ReturnType<typeof spyOn>;
 
@@ -77,19 +591,6 @@ describe('serveCommand', () => {
 
   afterEach(() => {
     consoleErrorSpy.mockRestore();
-  });
-
-  it('should reject in dev mode (non-binary)', async () => {
-    const exitCode = await serveCommand({});
-    expect(exitCode).toBe(1);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Error: `archon serve` is for compiled binaries only.'
-    );
-  });
-
-  it('should reject with downloadOnly in dev mode', async () => {
-    const exitCode = await serveCommand({ downloadOnly: true });
-    expect(exitCode).toBe(1);
   });
 
   it('should reject invalid port (NaN)', async () => {

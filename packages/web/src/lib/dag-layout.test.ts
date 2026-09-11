@@ -20,6 +20,22 @@ describe('resolveNodeDisplay', () => {
     });
   });
 
+  test('command-backed loop node labels by command name and carries no promptText', () => {
+    const dn: DagNode = {
+      id: 'implement',
+      loop: {
+        command: 'archon-ralph-implement',
+        until: 'COMPLETE',
+        max_iterations: 15,
+        fresh_context: true,
+      },
+    };
+    expect(resolveNodeDisplay(dn)).toEqual({
+      label: 'archon-ralph-implement',
+      nodeType: 'loop',
+    });
+  });
+
   test('approval node returns label Approval and nodeType approval', () => {
     const dn: DagNode = {
       id: 'n2',
@@ -28,6 +44,18 @@ describe('resolveNodeDisplay', () => {
     expect(resolveNodeDisplay(dn)).toEqual({
       label: 'Approval',
       nodeType: 'approval',
+    });
+  });
+
+  test('wait node returns its condition without falling through to Prompt', (): void => {
+    const dn: DagNode = {
+      id: 'n3',
+      wait: { event: 'checks.complete', deadline_ms: 60_000 },
+    };
+    expect(resolveNodeDisplay(dn)).toEqual({
+      label: 'Wait',
+      nodeType: 'wait',
+      promptText: 'checks.complete',
     });
   });
 });

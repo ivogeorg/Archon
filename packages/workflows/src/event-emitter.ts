@@ -10,7 +10,7 @@
  * - Conversation-scoped subscriptions via registerRun() mapping
  */
 import { EventEmitter } from 'events';
-import type { ArtifactType } from './schemas';
+import type { ArtifactType, EffortLevel, NodeSkipReason, SkipCause } from './schemas';
 import { createLogger } from '@archon/paths';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -29,6 +29,7 @@ interface WorkflowStartedEvent {
   runId: string;
   workflowName: string;
   conversationId: string;
+  transcriptPath: string;
 }
 
 interface WorkflowCompletedEvent {
@@ -87,6 +88,7 @@ interface NodeStartedEvent {
   provider?: string; // resolved AI provider (absent for bash/script nodes)
   model?: string; // resolved model string (absent for bash/script nodes)
   tier?: 'small' | 'medium' | 'large'; // only set when node.model was a tier keyword
+  effort?: EffortLevel; // resolved AI effort (absent when unset or unsupported)
 }
 
 interface NodeCompletedEvent {
@@ -108,19 +110,28 @@ interface NodeFailedEvent {
   error: string;
 }
 
-interface NodeSkippedEvent {
+interface NodeSkippedEventBase {
   type: 'node_skipped';
   runId: string;
   nodeId: string;
   nodeName: string;
-  reason: 'when_condition' | 'when_condition_parse_error' | 'trigger_rule' | 'prior_success';
 }
+
+type NodeSkippedEvent = NodeSkippedEventBase &
+  (
+    | { reason: 'prior_success' }
+    | {
+        reason: Exclude<NodeSkipReason, 'prior_success'>;
+        cause: SkipCause;
+      }
+  );
 
 interface ToolStartedEvent {
   type: 'tool_started';
   runId: string;
   toolName: string;
   stepName: string;
+  toolCallId: string;
 }
 
 interface ToolCompletedEvent {
@@ -129,6 +140,9 @@ interface ToolCompletedEvent {
   toolName: string;
   stepName: string;
   durationMs: number;
+  toolCallId: string;
+  toolOutcome?: 'success' | 'error' | 'interrupted' | 'unknown';
+  exitCode?: number;
 }
 
 interface ApprovalPendingEvent {
@@ -161,6 +175,9 @@ interface TaskActivityEvent {
   usage?: { total_tokens: number; tool_uses: number; duration_ms: number };
   lastToolName?: string;
   taskType?: string;
+  /** Transcript/output file the settled task points at (task_notification only)
+   *  — the artifact trail for delegated work (#2083). */
+  outputFile?: string;
   /** True when SDK signaled skip_transcript (housekeeping) — propagated so the
    *  UI / persistence layer can decide whether to surface. The provider
    *  filters these out today, but the field is here for forward-compat. */
@@ -183,6 +200,26 @@ interface HookActivityEvent {
   exitCode?: number;
 }
 
+/**
+ * Container isolation backend lifecycle (folder-project container runs).
+ * `created`/`destroyed` bracket the run; `stopped`/`resumed` bracket a suspend
+ * across a pause; the `writeback_*` phases track the engine-level write-back gate
+ * (requested → applied / discarded) (Phase C).
+ */
+export interface ContainerLifecycleEvent {
+  type: 'container_lifecycle';
+  runId: string;
+  phase:
+    | 'created'
+    | 'stopped'
+    | 'resumed'
+    | 'destroyed'
+    | 'writeback_requested'
+    | 'writeback_applied'
+    | 'writeback_discarded';
+  containerId?: string;
+}
+
 export type WorkflowEmitterEvent =
   | WorkflowStartedEvent
   | WorkflowCompletedEvent
@@ -200,7 +237,8 @@ export type WorkflowEmitterEvent =
   | ApprovalPendingEvent
   | WorkflowCancelledEvent
   | TaskActivityEvent
-  | HookActivityEvent;
+  | HookActivityEvent
+  | ContainerLifecycleEvent;
 
 // ---------------------------------------------------------------------------
 // Emitter class

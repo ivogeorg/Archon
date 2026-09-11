@@ -46,6 +46,7 @@ Archon refuses to start with **both** modes configured. Pick one set of env vars
 
 | Permission       | Access       | Used for                                          |
 | ---------------- | ------------ | ------------------------------------------------- |
+| Checks           | Read         | Waking workflow CI waits when a check concludes   |
 | Contents         | Read         | Cloning + reading repo metadata                   |
 | Issues           | Read & Write | `createComment` + `listComments`                  |
 | Pull requests    | Read & Write | `pulls.get` + comment posting                     |
@@ -58,9 +59,12 @@ Archon refuses to start with **both** modes configured. Pick one set of env vars
 Subscribe to:
 
 - Issue comments
+- Check runs
 - Pull request review comments
 - Pull request
 - Issues (used for `closed` cleanup)
+
+Existing installations must accept the added Checks permission before check-run wake-ups work. If a check-run webhook is unavailable, delivery still progresses after the wait's five-minute deadline and probes CI again.
 
 ## Step 4: Generate a private key
 
@@ -163,7 +167,7 @@ A 401 from any installation Octokit evicts the cached token and the call is retr
 
 Workflows that span >1h need a fresh token to push from the cloned worktree. Archon installs a git credential helper at clone time (App mode only): the worktree's `.git/config` points at `~/.archon/bin/git-credential-archon`, which talks back to Archon's internal endpoint for a fresh installation token on each operation.
 
-> **Compiled binary builds:** the credential helper is installed from `scripts/git-credential-archon.sh` in the source tree. Compiled binaries that don't ship `scripts/` on disk silently skip the install — workflows up to 1h still succeed via the URL-embedded installation token and the `GH_TOKEN` env injection, but longer workflows will see `git push` fail with "Authentication failed" past the 1h mark. Track this when running App mode in a binary deployment.
+The helper is embedded in compiled binaries. App-mode repository setup fails if Archon cannot install or register it, rather than leaving later fetches and pushes without a refreshable credential source.
 
 ### Internal endpoint security — REQUIRED
 
@@ -176,7 +180,7 @@ Archon enforces this at startup: with App mode active and the server bound to a 
 
 Example Caddy snippet that drops `/internal/*` (bare-metal):
 
-```caddyfile
+```txt
 example.com {
   @internal path /internal/*
   respond @internal 404
@@ -203,7 +207,7 @@ The `!override` tag (compose-spec) replaces the base file's `ports` list instead
 
 Insert this `handle` block before the fallthrough `handle { }` block:
 
-```caddyfile
+```txt
 handle /internal/* {
   respond "Not Found" 404
 }
@@ -252,7 +256,7 @@ If the external POST probe returns anything other than `404` or `403` from the p
 2. Add `GITHUB_APP_*` env vars (Step 6).
 3. **Remove** `GITHUB_TOKEN` from your env (or comment it out). Archon refuses to start if both are set.
 4. Restart Archon.
-5. Webhook URLs configured per-repo against the PAT-mode setup can stay or be removed — the App's single webhook URL covers everything once it's installed. New repos auto-join via App installation.
+5. Webhook URLs configured per-repo against the PAT-mode setup can stay or be removed — the App's single webhook URL covers everything once it's installed. New repos auto-join via App installation. While both webhooks are active, a comment delivered by each is deduplicated at ingest, so the bot still responds once.
 
 ## Troubleshooting
 

@@ -9,7 +9,12 @@
  * All functions are side-effect free so they stay unit-testable without DOM
  * rendering — the console's testing pattern for panel logic (lib/agent-status.ts).
  */
-import type { AgentCredentials, OpencodeCredentialProvider, PiModelInfo } from '../skills';
+import type {
+  AgentCredentials,
+  OpencodeCredentialProvider,
+  PiModelInfo,
+  ProviderInfo,
+} from '../skills';
 import { isCredentialUsable } from './agent-status';
 
 /** One suggestion in a model picker dropdown. */
@@ -66,14 +71,14 @@ export const CLAUDE_MODEL_OPTIONS: readonly ModelOption[] = [
 ];
 
 /**
- * Codex model strings used across the repo's config examples
- * (docs/getting-started/ai-assistants.md and CLAUDE.md: `gpt-5.3-codex`,
- * tiers example `gpt-5.5`, docs `gpt-5.2`).
+ * Codex model strings mirroring the current lineup in the repo's config
+ * examples (docs/getting-started/ai-assistants.md and CLAUDE.md): `gpt-5.6-sol`
+ * (flagship), `gpt-5.6-terra` (mid), `gpt-5.6-luna` (light).
  */
 export const CODEX_MODEL_OPTIONS: readonly ModelOption[] = [
-  { value: 'gpt-5.3-codex' },
-  { value: 'gpt-5.5' },
-  { value: 'gpt-5.2' },
+  { value: 'gpt-5.6-sol' },
+  { value: 'gpt-5.6-terra' },
+  { value: 'gpt-5.6-luna' },
 ];
 
 /**
@@ -99,43 +104,36 @@ export function curatedOptionsForAgent(agentId: string): readonly ModelOption[] 
 }
 
 // ---------------------------------------------------------------------------
-// Effort. Tier/alias `effort` only ROUTES on Claude (node `effort`) and Codex
-// (`modelReasoningEffort`) — `routePresetEffort` in
-// packages/workflows/src/model-validation.ts returns null for everything else,
-// and the PATCH routes validate via `isEffortValidForProvider`. The web
-// package cannot import @archon/workflows, so the vocabularies are mirrored
-// here (same convention as REASONING_EFFORTS in the Defaults panel).
+// Effort. GET /api/providers carries the core-owned ladder for every provider
+// that accepts it, so the web has no second vocabulary to maintain.
 // ---------------------------------------------------------------------------
 
-/** Mirrors CLAUDE_EFFORTS in packages/workflows/src/model-validation.ts. */
-export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'] as const;
-/** Mirrors CODEX_REASONING_EFFORTS in packages/workflows/src/model-validation.ts. */
-export const CODEX_EFFORT_OPTIONS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
-
-export type ClaudeEffort = (typeof CLAUDE_EFFORT_OPTIONS)[number];
-export type CodexEffort = (typeof CODEX_EFFORT_OPTIONS)[number];
-/** Any effort value an agent's vocabulary can produce. */
-export type EffortOption = ClaudeEffort | CodexEffort;
+export type EffortOption = NonNullable<ProviderInfo['effortLevels']>[number];
 
 /**
- * The effort vocabulary an agent's tier/alias `effort` accepts, or null when
- * effort doesn't route there (Pi/OpenCode/Copilot presets drop it) — null
- * hides the field entirely instead of offering a no-op input.
+ * The effort vocabulary an agent's tier/alias `effort` accepts, or null when the
+ * agent has no reasoning control (OpenCode configures it in `opencode.json`) —
+ * null hides the field entirely instead of offering a no-op input.
  */
-export function effortOptionsForAgent(agentId: string): readonly EffortOption[] | null {
-  if (agentId === 'claude') return CLAUDE_EFFORT_OPTIONS;
-  if (agentId === 'codex') return CODEX_EFFORT_OPTIONS;
-  return null;
+export function effortOptionsForAgent(
+  agentId: string,
+  providers: readonly Pick<ProviderInfo, 'id' | 'effortLevels'>[]
+): readonly EffortOption[] | null {
+  const provider = providers.find(p => p.id === agentId);
+  return provider?.effortLevels ?? null;
 }
 
 /**
- * Carry an effort value across a provider switch: keep it when the new agent's
- * vocabulary accepts it (e.g. codex→claude keeps 'high'), clear it otherwise
- * (including agents with no effort concept, where the field is hidden and a
- * stale value would be invisible state).
+ * Carry an effort value across a provider switch: keep it when the new agent
+ * takes effort at all, clear it otherwise (agents with no effort concept hide
+ * the field, where a stale value would be invisible state).
  */
-export function normalizeEffortForAgent(agentId: string, effort: string): EffortOption | '' {
-  const valid = effortOptionsForAgent(agentId);
+export function normalizeEffortForAgent(
+  agentId: string,
+  effort: string,
+  providers: readonly Pick<ProviderInfo, 'id' | 'effortLevels'>[]
+): EffortOption | '' {
+  const valid = effortOptionsForAgent(agentId, providers);
   return valid?.find(v => v === effort) ?? '';
 }
 

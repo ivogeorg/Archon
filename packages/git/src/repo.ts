@@ -1,3 +1,6 @@
+import { existsSync } from 'fs';
+import { readdir } from 'fs/promises';
+import { join } from 'path';
 import { createLogger } from '@archon/paths';
 import { execFileAsync } from './exec';
 import { getDefaultBranch } from './branch';
@@ -46,12 +49,63 @@ export async function findRepoRoot(startPath: string): Promise<RepoPath | null> 
 }
 
 /**
- * Get the remote URL for origin (if it exists)
- * Returns null if no remote is configured
+ * List the immediate child directories of `rootPath` that are themselves git
+ * repositories (contain a `.git` directory or file). One level only — no
+ * recursion. Used to surface the contained repos of a folder project (a
+ * multi-repo root). Returns the child names (basenames), sorted.
+ *
+ * Never throws: returns [] if `rootPath` can't be read (missing, not a
+ * directory, permission denied) — the caller treats "no child repos" and
+ * "unreadable root" identically.
  */
-export async function getRemoteUrl(repoPath: RepoPath): Promise<string | null> {
+export async function listChildRepos(rootPath: string): Promise<string[]> {
+  let names: string[];
   try {
-    const { stdout } = await execFileAsync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
+    names = await readdir(rootPath);
+  } catch (error) {
+    // An unreadable/missing root is an anomaly for a registered folder project —
+    // log at warn (not debug) so it's visible, then return [] (callers treat
+    // "no child repos" and "unreadable root" the same, but the log distinguishes).
+    getLog().warn({ rootPath, err: error as Error }, 'git.child_repos_read_failed');
+    return [];
+  }
+  // existsSync follows symlinks and matches both a `.git` directory (normal
+  // clone) and a `.git` file (worktree/submodule pointer).
+  return names.filter(name => existsSync(join(rootPath, name, '.git'))).sort();
+}
+
+/**
+ * Detect the default remote name for a repository.
+ *
+ * Resolution order:
+ *   1. 'origin' — if it exists (standard Git convention)
+ *   2. The sole remote — if only one is configured
+ *   3. null — ambiguous (multiple non-origin remotes) or no remotes at all
+ *
+ * Callers can override via `worktree.remote` in `.archon/config.yaml`.
+ * Git errors (not a repo, permission denied) propagate — a null return
+ * always means "no unambiguous remote", never a swallowed failure.
+ */
+export async function getDefaultRemote(repoPath: RepoPath): Promise<string | null> {
+  const { stdout } = await execFileAsync('git', ['-C', repoPath, 'remote'], { timeout: 10000 });
+  // Split on LF or CRLF (Windows git) and trim each entry defensively
+  const remotes = stdout
+    .split(/\r?\n/)
+    .map(r => r.trim())
+    .filter(r => r.length > 0);
+  if (remotes.length === 0) return null;
+  if (remotes.includes('origin')) return 'origin';
+  if (remotes.length === 1) return remotes[0];
+  return null;
+}
+
+/**
+ * Get the URL configured for a git remote (default: 'origin').
+ * Returns null if the remote does not exist.
+ */
+export async function getRemoteUrl(repoPath: RepoPath, remote = 'origin'): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', repoPath, 'remote', 'get-url', remote], {
       timeout: 10000,
     });
     return stdout.trim() || null;
@@ -59,7 +113,7 @@ export async function getRemoteUrl(repoPath: RepoPath): Promise<string | null> {
     const err = error as Error & { stderr?: string };
     const errorText = `${err.message} ${err.stderr ?? ''}`;
 
-    // Expected: no remote named origin
+    // Expected: no remote with that name
     if (
       errorText.includes('No such remote') ||
       errorText.includes('does not have a url configured')
@@ -68,19 +122,69 @@ export async function getRemoteUrl(repoPath: RepoPath): Promise<string | null> {
     }
 
     // Unexpected error - surface it
-    getLog().error({ repoPath, err, stderr: err.stderr }, 'get_remote_url_failed');
-    throw new Error(`Failed to get remote URL for ${repoPath}: ${err.message}`);
+    getLog().error({ repoPath, remote, err, stderr: err.stderr }, 'get_remote_url_failed');
+    throw new Error(`Failed to get remote URL for ${repoPath} (remote: ${remote}): ${err.message}`);
+  }
+}
+
+const MAX_FETCH_RETRIES = 3;
+
+/**
+ * Run `git fetch <remote> <refspec>` with bounded retry on Git's ref-lock race.
+ *
+ * Two concurrent fetches that write the same named ref — a remote-tracking ref,
+ * or a local branch via a `pull/N/head:branch` refspec — collide on Git's shared
+ * lock file and fail transiently with `cannot lock ref ... unable to update local
+ * ref`. This helper owns the single ref-lock classifier and backoff budget for
+ * the codebase: race failures are retried up to MAX_FETCH_RETRIES times with
+ * 50ms doubling backoff, then the original error object is rethrown untouched
+ * (stderr preserved for callers). Any other failure is rethrown immediately —
+ * unrelated git errors are attempted once and stay loud.
+ */
+export async function fetchWithRefLockRetry(
+  repoPath: RepoPath,
+  remote: string,
+  refspec: string | undefined,
+  options?: { timeoutMs?: number }
+): Promise<{ stdout: string; stderr: string }> {
+  const args =
+    refspec === undefined
+      ? ['-C', repoPath, 'fetch', remote]
+      : ['-C', repoPath, 'fetch', remote, refspec];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await execFileAsync('git', args, {
+        timeout: options?.timeoutMs,
+      });
+    } catch (error) {
+      const err = error as Error;
+      const errorMessage = err.message.toLowerCase();
+      const isRefLockRace =
+        errorMessage.includes('cannot lock ref') &&
+        errorMessage.includes('unable to update local ref');
+
+      if (!isRefLockRace || attempt >= MAX_FETCH_RETRIES) {
+        throw error;
+      }
+
+      const backoffMs = 50 * Math.pow(2, attempt);
+      getLog().debug(
+        { err, attempt: attempt + 1, backoffMs, remote, refspec },
+        'git.fetch_ref_lock_retry'
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
   }
 }
 
 /**
- * Sync workspace with remote origin.
- * Fetches the base branch from origin, then updates local state according to mode.
+ * Sync workspace with its remote.
+ * Fetches the base branch from the remote, then updates local state according to mode.
  *
  * Modes:
  * - fast-forward (default): fetch, classify state, and fast-forward only when safe.
  * - fetch-only: fetch and classify without touching the working tree.
- * - reset: fetch and hard-reset to origin/<branch>. This is destructive and must be
+ * - reset: fetch and hard-reset to <remote>/<branch>. This is destructive and must be
  *   requested explicitly by callers that own the checkout.
  *
  * Branch resolution:
@@ -90,23 +194,26 @@ export async function getRemoteUrl(repoPath: RepoPath): Promise<string | null> {
  *
  * @param workspacePath - Path to the workspace (canonical repo, not worktree)
  * @param baseBranch - Optional base branch name (e.g., 'main', 'develop'). If omitted, auto-detects default branch
- * @param options - Optional sync mode. Defaults to non-destructive fast-forward.
+ * @param options - Optional settings:
+ *   - `mode`: sync mode. Defaults to non-destructive fast-forward.
+ *   - `remote` (default 'origin'): git remote name to fetch from.
  * @returns Branch used plus whether sync was performed
  * @throws Error with actionable message if configured branch doesn't exist
  */
 export async function syncWorkspace(
   workspacePath: RepoPath,
   baseBranch?: BranchName,
-  options?: { mode?: WorkspaceSyncMode }
+  options?: { mode?: WorkspaceSyncMode; remote?: string }
 ): Promise<WorkspaceSyncResult> {
   const mode = options?.mode ?? 'fast-forward';
-  const branchToSync = baseBranch ?? (await getDefaultBranch(workspacePath));
+  const remote = options?.remote ?? 'origin';
+  const branchToSync = baseBranch ?? (await getDefaultBranch(workspacePath, remote));
 
-  // Fetch from origin to ensure origin/<branchToSync> is up-to-date
+  // Fetch from the remote to ensure <remote>/<branchToSync> is up-to-date.
+  // Concurrent fetches of the same remote-tracking ref can collide on Git's
+  // shared ref lock; fetchWithRefLockRetry owns the bounded retry.
   try {
-    await execFileAsync('git', ['-C', workspacePath, 'fetch', 'origin', branchToSync], {
-      timeout: 60000,
-    });
+    await fetchWithRefLockRetry(workspacePath, remote, branchToSync, { timeoutMs: 60000 });
   } catch (error) {
     const err = error as Error;
     const errorMessage = err.message.toLowerCase();
@@ -117,18 +224,19 @@ export async function syncWorkspace(
       (errorMessage.includes("couldn't find remote ref") || errorMessage.includes('not found'))
     ) {
       throw new Error(
-        `Configured base branch '${baseBranch}' not found on remote. ` +
+        `Configured base branch '${baseBranch}' not found on remote '${remote}'. ` +
           'Either create the branch, update worktree.baseBranch in .archon/config.yaml, ' +
           'or remove the setting to use the auto-detected default branch.'
       );
     }
-    throw new Error(`Sync fetch from origin/${branchToSync} failed: ${err.message}`);
+
+    throw new Error(`Sync fetch from ${remote}/${branchToSync} failed: ${err.message}`);
   }
 
   const previousHead = await readShortSha(workspacePath, 'HEAD');
 
   if (mode !== 'reset') {
-    const state = await classifyWorkspaceState(workspacePath, branchToSync);
+    const state = await classifyWorkspaceState(workspacePath, branchToSync, remote);
 
     if (mode === 'fetch-only' || state !== 'behind') {
       return unchangedSyncResult(branchToSync, mode, state, previousHead);
@@ -142,14 +250,14 @@ export async function syncWorkspace(
     try {
       await execFileAsync(
         'git',
-        ['-C', workspacePath, 'merge', '--ff-only', `origin/${branchToSync}`],
+        ['-C', workspacePath, 'merge', '--ff-only', `${remote}/${branchToSync}`],
         {
           timeout: 30000,
         }
       );
     } catch (error) {
       const err = error as Error;
-      throw new Error(`Fast-forward to origin/${branchToSync} failed: ${err.message}`);
+      throw new Error(`Fast-forward to ${remote}/${branchToSync} failed: ${err.message}`);
     }
 
     const newHead = await readShortSha(workspacePath, 'HEAD');
@@ -164,15 +272,19 @@ export async function syncWorkspace(
     };
   }
 
-  // Hard-reset local working tree to match origin — only safe for Archon-managed
+  // Hard-reset local working tree to match the remote — only safe for Archon-managed
   // clones, never for a user's local working directory.
   try {
-    await execFileAsync('git', ['-C', workspacePath, 'reset', '--hard', `origin/${branchToSync}`], {
-      timeout: 30000,
-    });
+    await execFileAsync(
+      'git',
+      ['-C', workspacePath, 'reset', '--hard', `${remote}/${branchToSync}`],
+      {
+        timeout: 30000,
+      }
+    );
   } catch (error) {
     const err = error as Error;
-    throw new Error(`Reset to origin/${branchToSync} failed: ${err.message}`);
+    throw new Error(`Reset to ${remote}/${branchToSync} failed: ${err.message}`);
   }
 
   const newHead = await readShortSha(workspacePath, 'HEAD');
@@ -277,14 +389,15 @@ async function isAncestor(
 
 async function classifyWorkspaceState(
   workspacePath: RepoPath,
-  branchToSync: BranchName
+  branchToSync: BranchName,
+  remote = 'origin'
 ): Promise<WorkspaceSyncState> {
   if (await hasTrackedModifications(workspacePath)) {
     return 'dirty';
   }
 
   const localSha = await readSha(workspacePath, 'HEAD');
-  const remoteRef = `origin/${branchToSync}`;
+  const remoteRef = `${remote}/${branchToSync}`;
   const remoteSha = await readSha(workspacePath, remoteRef);
 
   if (localSha === remoteSha) {
@@ -305,44 +418,145 @@ async function classifyWorkspaceState(
  *
  * @param url - Repository URL (e.g., https://github.com/owner/repo.git)
  * @param targetPath - Local path to clone into
- * @param options - Optional: { token } for authenticated clones
+ * @param options - Optional request-scoped HTTP credentials
  * @returns GitResult<void>
  */
+export interface CloneCredentials {
+  username: string;
+  password: string;
+}
+
+export interface CloneRepositoryOptions {
+  credentials?: CloneCredentials;
+}
+
+const ENV_CREDENTIAL_HELPER =
+  '!f() { test "$1" = get || exit 0; printf \'%s\\n\' "username=$ARCHON_GIT_USERNAME" "password=$ARCHON_GIT_PASSWORD"; }; f';
+
+function normalizeCloneSource(url: string): string {
+  if (url.startsWith('/') || url.startsWith('~') || url.startsWith('.')) return url;
+
+  const scpStyle = /^git@([^:]+):(.+)$/.exec(url);
+  if (scpStyle) return `https://${scpStyle[1]}/${scpStyle[2]}`;
+
+  const firstSlash = url.indexOf('/');
+  if (firstSlash <= 0 || url.includes('://')) return url;
+
+  const authority = url.slice(0, firstSlash);
+  const isBareHost =
+    authority === 'localhost' ||
+    authority.includes('.') ||
+    /^[^:]+:\d+$/.test(authority) ||
+    /^\[[^\]]+\](?::\d+)?$/.test(authority);
+  return isBareHost ? `https://${url}` : url;
+}
+
+export function validateCloneUrl(
+  url: string
+): { ok: true; url: string; httpUrl: URL | null } | { ok: false; error: string } {
+  const cloneSource = normalizeCloneSource(url);
+  if (!/^\s*https?:/i.test(cloneSource)) {
+    return { ok: true, url: cloneSource, httpUrl: null };
+  }
+  if (cloneSource.includes('\\')) {
+    return { ok: false, error: 'Invalid HTTP(S) repository URL' };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(cloneSource);
+  } catch {
+    return { ok: false, error: 'Invalid HTTP(S) repository URL' };
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'Invalid HTTP(S) repository URL' };
+  }
+  if (parsed.username || parsed.password) {
+    return { ok: false, error: 'Repository URL must not include credentials' };
+  }
+  if (parsed.search || parsed.hash) {
+    return { ok: false, error: 'Invalid HTTP(S) repository URL' };
+  }
+  return { ok: true, url: parsed.href, httpUrl: parsed };
+}
+
+function sanitizeCloneError(error: unknown, credentials?: CloneCredentials): string {
+  const err = error as Error & { stdout?: string; stderr?: string };
+  let message = [err.message, err.stderr, err.stdout].filter(Boolean).join('\n');
+  const credentialValues = credentials
+    ? [credentials.username, credentials.password]
+        .filter(value => value.length > 0)
+        .sort((left, right) => right.length - left.length)
+    : [];
+  for (const value of credentialValues) message = message.replaceAll(value, '***');
+  return message;
+}
+
 export async function cloneRepository(
   url: string,
   targetPath: RepoPath,
-  options?: { token?: string }
+  options?: CloneRepositoryOptions
 ): Promise<GitResult<void>> {
+  const validatedUrl = validateCloneUrl(url);
+  if (!validatedUrl.ok) {
+    return { ok: false, error: { code: 'unknown', message: validatedUrl.error } };
+  }
+  const parsedUrl = validatedUrl.httpUrl;
+  if (options?.credentials && !parsedUrl) {
+    return {
+      ok: false,
+      error: { code: 'unknown', message: 'Authenticated clones require an HTTP(S) repository URL' },
+    };
+  }
+  const cloneUrl = validatedUrl.url;
+
   try {
-    let cloneUrl = url;
-    if (options?.token) {
-      // Construct authenticated URL: https://<token>@github.com/owner/repo.git
-      const parsed = new URL(url);
-      parsed.username = options.token;
-      cloneUrl = parsed.toString();
+    const args = ['clone', cloneUrl, targetPath];
+    const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    delete env.ARCHON_GIT_USERNAME;
+    delete env.ARCHON_GIT_PASSWORD;
+    if (options?.credentials && parsedUrl) {
+      args.unshift(
+        '-c',
+        'credential.helper=',
+        '-c',
+        `credential.${parsedUrl.origin}.helper=${ENV_CREDENTIAL_HELPER}`
+      );
+      env.ARCHON_GIT_USERNAME = options.credentials.username;
+      env.ARCHON_GIT_PASSWORD = options.credentials.password;
     }
 
-    await execFileAsync('git', ['clone', cloneUrl, targetPath], { timeout: 120000 });
+    // GIT_TERMINAL_PROMPT=0 turns any missing-creds scenario into an
+    // immediate, readable error instead of a hung stdin credential prompt.
+    await execFileAsync('git', args, {
+      timeout: 120000,
+      env,
+    });
     return { ok: true, value: undefined };
   } catch (error) {
-    const err = error as Error;
-    // Sanitize any token from error messages to prevent credential leakage
-    const sanitizedMessage = options?.token
-      ? err.message.replaceAll(options.token, '***')
-      : err.message;
+    const sanitizedMessage = sanitizeCloneError(error, options?.credentials);
     const message = sanitizedMessage.toLowerCase();
 
     if (message.includes('not found') || message.includes('404')) {
-      return { ok: false, error: { code: 'not_a_repo', path: url } };
+      return { ok: false, error: { code: 'not_a_repo', path: cloneUrl } };
     }
-    if (message.includes('authentication failed') || message.includes('could not read')) {
-      return { ok: false, error: { code: 'permission_denied', path: url } };
+    if (
+      message.includes('authentication failed') ||
+      message.includes('could not read') ||
+      message.includes('access denied') ||
+      message.includes('403')
+    ) {
+      return { ok: false, error: { code: 'permission_denied', path: cloneUrl } };
     }
     if (message.includes('no space')) {
       return { ok: false, error: { code: 'no_space', path: targetPath } };
     }
 
-    getLog().error({ url, targetPath, errorMessage: sanitizedMessage }, 'clone_repository_failed');
+    getLog().error(
+      { url: cloneUrl, targetPath, errorMessage: sanitizedMessage },
+      'clone_repository_failed'
+    );
     return { ok: false, error: { code: 'unknown', message: sanitizedMessage } };
   }
 }
@@ -352,23 +566,25 @@ export async function cloneRepository(
  * Runs sequential fetch + reset --hard. If fetch fails, reset is skipped.
  * Uses execFileAsync (no shell interpolation) for safety.
  *
- * Note: Uses `cwd` option instead of `-C` flag. Both are functionally
- * equivalent; this style was chosen for readability with multi-arg commands.
+ * Note: the reset uses the `cwd` option; the fetch goes through
+ * fetchWithRefLockRetry, which uses `-C`. Both are functionally equivalent.
  *
  * @param repoPath - Path to the local repository
  * @param branch - Branch to sync to (e.g., 'main')
+ * @param remote - Remote name to fetch from (default: 'origin')
  * @returns GitResult<void>
  */
 export async function syncRepository(
   repoPath: RepoPath,
-  branch: BranchName
+  branch: BranchName,
+  remote = 'origin'
 ): Promise<GitResult<void>> {
   try {
-    await execFileAsync('git', ['fetch', 'origin'], { cwd: repoPath, timeout: 60000 });
+    await fetchWithRefLockRetry(repoPath, remote, undefined, { timeoutMs: 60000 });
   } catch (error) {
     const err = error as Error & { stderr?: string };
     const errorText = `${err.message} ${err.stderr ?? ''}`.toLowerCase();
-    getLog().error({ err, repoPath, branch }, 'sync_repository_fetch_failed');
+    getLog().error({ err, repoPath, branch, remote }, 'sync_repository_fetch_failed');
 
     if (errorText.includes('not a git repository')) {
       return { ok: false, error: { code: 'not_a_repo', path: repoPath } };
@@ -383,7 +599,7 @@ export async function syncRepository(
   }
 
   try {
-    await execFileAsync('git', ['reset', '--hard', `origin/${branch}`], {
+    await execFileAsync('git', ['reset', '--hard', `${remote}/${branch}`], {
       cwd: repoPath,
       timeout: 30000,
     });
@@ -395,7 +611,7 @@ export async function syncRepository(
       return { ok: false, error: { code: 'branch_not_found', branch } };
     }
 
-    getLog().error({ err, repoPath, branch }, 'sync_repository_reset_failed');
+    getLog().error({ err, repoPath, branch, remote }, 'sync_repository_reset_failed');
     return { ok: false, error: { code: 'unknown', message: `Reset failed: ${err.message}` } };
   }
 

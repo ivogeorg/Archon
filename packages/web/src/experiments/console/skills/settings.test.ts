@@ -43,13 +43,13 @@ describe('buildAssistantUpdate', () => {
     const body = buildAssistantUpdate(
       form({
         assistant: 'codex',
-        models: { codex: 'gpt-5.3-codex' },
+        models: { codex: 'gpt-5.6-sol' },
         modelReasoningEffort: 'high',
         webSearchMode: 'live',
       })
     );
     expect(body.assistants).toEqual({
-      codex: { model: 'gpt-5.3-codex', modelReasoningEffort: 'high', webSearchMode: 'live' },
+      codex: { model: 'gpt-5.6-sol', modelReasoningEffort: 'high', webSearchMode: 'live' },
     });
   });
 
@@ -116,7 +116,7 @@ describe('buildTiersUpdate', () => {
 
   test('trims whitespace on every field', () => {
     const body = buildTiersUpdate(
-      tierForm({ large: { provider: '  claude ', model: ' opus ', effort: ' high ' } })
+      tierForm({ large: { provider: '  claude ', model: ' opus ', effort: 'high' } })
     );
     expect(body.tiers.large).toEqual({ provider: 'claude', model: 'opus', effort: 'high' });
   });

@@ -38,6 +38,7 @@ import type {
   RawAliasesConfig,
   RawTiersConfig,
 } from './config-types';
+import { workflowContinuationConfigSchema } from './config-types';
 import { createLogger } from '@archon/paths';
 import {
   isRegisteredProvider,
@@ -47,6 +48,10 @@ import {
 } from '@archon/providers';
 import { buildAiProfile, TIER_NAMES } from '@archon/workflows/model-validation';
 import type { RawAliasEntry, TierName } from '@archon/workflows/model-validation';
+import {
+  rawAliasesConfigSchema,
+  rawTiersConfigSchema,
+} from '@archon/workflows/schemas/model-binding';
 
 /**
  * A per-key patch for the `tiers:` config. Unlike `RawTiersConfig`, a tier value
@@ -201,7 +206,7 @@ const DEFAULT_CONFIG_CONTENT = `# Archon Global Configuration
 #   claude:
 #     model: sonnet
 #   codex:
-#     model: gpt-5.3-codex
+#     model: gpt-5.6-sol
 #     modelReasoningEffort: medium
 #     webSearchMode: disabled
 #     additionalDirectories:
@@ -210,7 +215,7 @@ const DEFAULT_CONFIG_CONTENT = `# Archon Global Configuration
 # Model tier presets (usable as model: small / medium / large)
 # tiers:
 #   large: { provider: claude, model: opus }
-#   medium: { provider: codex, model: gpt-5.5, effort: high }
+#   medium: { provider: codex, model: gpt-5.6-terra, effort: high }
 #   small: { provider: pi, model: minimax-m3 }
 
 # Streaming mode per platform (stream or batch)
@@ -257,6 +262,39 @@ async function createDefaultConfig(configPath: string): Promise<void> {
   }
 }
 
+function validateWorkflowContinuationConfig(parsed: unknown, configPath: string): void {
+  if (typeof parsed !== 'object' || parsed === null || !('workflows' in parsed)) return;
+  const config = parsed as { workflows?: unknown };
+  if (config.workflows === undefined) return;
+  const result = workflowContinuationConfigSchema.safeParse(config.workflows);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+      .join('; ');
+    throw new Error(`Invalid workflows config in '${configPath}': ${issues}`);
+  }
+  config.workflows = result.data;
+}
+
+function validateModelBindingConfig(parsed: unknown, configPath: string): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const config = parsed as Record<string, unknown>;
+  for (const [field, schema] of [
+    ['tiers', rawTiersConfigSchema],
+    ['aliases', rawAliasesConfigSchema],
+  ] as const) {
+    if (config[field] === undefined) continue;
+    const result = schema.safeParse(config[field]);
+    if (!result.success) {
+      const issues = result.error.issues
+        .map(issue => `${field}.${issue.path.join('.') || '<root>'}: ${issue.message}`)
+        .join('; ');
+      throw new Error(`Invalid model binding config in '${configPath}': ${issues}`);
+    }
+    config[field] = result.data;
+  }
+}
+
 /**
  * Load global config from ~/.archon/config.yaml
  * Creates default config if file doesn't exist
@@ -270,7 +308,10 @@ export async function loadGlobalConfig(forceReload = false): Promise<GlobalConfi
 
   try {
     const content = await readConfigFile(configPath);
-    cachedGlobalConfig = parseYaml(content) as GlobalConfig;
+    const parsed = parseYaml(content);
+    validateWorkflowContinuationConfig(parsed, configPath);
+    validateModelBindingConfig(parsed, configPath);
+    cachedGlobalConfig = parsed as GlobalConfig;
     return cachedGlobalConfig ?? {};
   } catch (error) {
     const err = error as { code?: string };
@@ -320,7 +361,10 @@ export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
 
   try {
     const content = await readConfigFile(configPath);
-    const parsed = (parseYaml(content) as RepoConfig) ?? {};
+    const raw = parseYaml(content);
+    validateWorkflowContinuationConfig(raw, configPath);
+    validateModelBindingConfig(raw, configPath);
+    const parsed = (raw as RepoConfig) ?? {};
     const recommendedWorkflows = sanitizeRecommendedWorkflows(
       (parsed as { recommendedWorkflows?: unknown }).recommendedWorkflows,
       configPath
@@ -376,6 +420,11 @@ function getDefaults(): MergedConfig {
     },
     concurrency: {
       maxConversations: 10,
+    },
+    workflows: {
+      autoResumeOnQuotaReset: false,
+      quotaMaxAttempts: 1,
+      quotaDeadlineMs: 24 * 60 * 60 * 1000,
     },
     commands: {
       folder: undefined,
@@ -510,6 +559,15 @@ function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): Merged
     result.concurrency.maxConversations = global.concurrency.maxConversations;
   }
 
+  if (global.workflows) {
+    result.workflows = { ...result.workflows, ...global.workflows };
+  }
+
+  // Container backend defaults (folder projects)
+  if (global.container) {
+    result.container = { ...global.container };
+  }
+
   return result;
 }
 
@@ -539,6 +597,10 @@ function mergeRepoConfig(merged: MergedConfig, repo: RepoConfig): MergedConfig {
   result.aliases = mergeAliases(result.aliases, repo.aliases);
   result.tiers = mergeTiers(result.tiers, repo.tiers);
 
+  if (repo.workflows) {
+    result.workflows = { ...result.workflows, ...repo.workflows };
+  }
+
   // Commands config
   if (repo.commands) {
     result.commands = {
@@ -564,6 +626,11 @@ function mergeRepoConfig(merged: MergedConfig, repo: RepoConfig): MergedConfig {
     result.baseBranch = repo.worktree.baseBranch.trim();
   }
 
+  // Pass remote to callers for git fetch/push operations
+  if (repo.worktree?.remote?.trim()) {
+    result.remote = repo.worktree.remote.trim();
+  }
+
   // Propagate docs path for $DOCS_DIR substitution in workflow commands
   if (repo.docs?.path !== undefined) {
     const trimmed = repo.docs.path.trim();
@@ -577,6 +644,16 @@ function mergeRepoConfig(merged: MergedConfig, repo: RepoConfig): MergedConfig {
   // Propagate per-project env vars from repo config
   if (repo.env) {
     result.envVars = { ...result.envVars, ...repo.env };
+  }
+
+  // Container backend settings — repo overrides global per-field.
+  if (repo.container) {
+    result.container = {
+      ...result.container,
+      ...Object.fromEntries(
+        Object.entries(repo.container).filter(([, value]) => value !== undefined)
+      ),
+    };
   }
 
   return result;
@@ -671,6 +748,13 @@ export async function updateGlobalConfig(
       merged.concurrency = { ...current.concurrency, ...updates.concurrency };
     }
 
+    if (updates.workflows) {
+      merged.workflows = workflowContinuationConfigSchema.parse({
+        ...current.workflows,
+        ...updates.workflows,
+      });
+    }
+
     if (updates.tiers) {
       // Per-key merge: `null` unsets a tier, a value sets it, and an absent key
       // (`undefined`) preserves the existing tier — so a single-tier PATCH/CLI
@@ -741,7 +825,6 @@ function tierDefaultsFor(provider: string): RawTiersConfig | undefined {
           provider: preset.provider,
           model: preset.model,
           ...(preset.effort !== undefined ? { effort: preset.effort } : {}),
-          ...(preset.thinking !== undefined ? { thinking: preset.thinking } : {}),
         };
       }
     }

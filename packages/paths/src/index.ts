@@ -1,12 +1,17 @@
 // Archon path resolution utilities
 export {
   expandTilde,
+  canonicalizeProjectPath,
   isDocker,
+  isWSL,
+  getWSLDistroName,
   getArchonHome,
   getArchonWorkspacesPath,
   ensureArchonWorkspacesPath,
   getArchonWorktreesPath,
+  getArchonTempPath,
   getArchonConfigPath,
+  getInstallManifestPath,
   getCredentialKeyPath,
   getArchonEnvPath,
   getRepoArchonEnvPath,
@@ -22,6 +27,7 @@ export {
   logArchonPaths,
   validateAppDefaultsPaths,
   parseOwnerRepo,
+  resolveRepoProjectIdentity,
   getProjectRoot,
   getProjectSourcePath,
   getProjectWorktreesPath,
@@ -29,12 +35,40 @@ export {
   getProjectLogsPath,
   getRunArtifactsPath,
   getRunLogPath,
+  sanitizeScopeSegment,
+  getScopeArtifactsPath,
+  resolveProjectStorageKey,
+  getProjectStoragePaths,
+  getStoragePathsForRoot,
+  isInsideArchonHome,
+  resolveRunStorageRoot,
+  getRunArtifactsDirForKey,
+  getRunArtifactsDirForRoot,
+  getRunLogPathForRoot,
+  getRunWorkflowSourceDirForRoot,
+  slugifyFolderName,
+  getFolderProjectRoot,
+  getFolderProjectArtifactsPath,
+  getFolderProjectLogsPath,
+  getFolderRunArtifactsPath,
+  ensureFolderProjectStructure,
   resolveProjectRootFromCwd,
   ensureProjectStructure,
   createProjectSourceSymlink,
   findMarkdownFilesRecursive,
+  findCommandFiles,
   getWebDistDir,
+  getSourceWebDistDir,
 } from './archon-paths';
+export type { ProjectStorageKey, ProjectStoragePaths } from './archon-paths';
+
+// Detached workflow install identity
+export {
+  DETACHED_INSTALL_CONTEXT_KEYS,
+  captureDetachedInstallContext,
+  restoreDetachedInstallContext,
+} from './detached-install-context';
+export type { DetachedInstallContext, DetachedInstallContextKey } from './detached-install-context';
 
 // Env loader
 export { loadArchonEnv, isVerboseBoot } from './env-loader';
@@ -44,7 +78,16 @@ export { createLogger, setLogLevel, getLogLevel, rootLogger } from './logger';
 export type { Logger } from './logger';
 
 // Build-time constants (rewritten by scripts/build-binaries.sh)
-export { BUNDLED_IS_BINARY, BUNDLED_VERSION, BUNDLED_GIT_COMMIT } from './bundled-build';
+export {
+  BUNDLED_IS_BINARY,
+  BUNDLED_VERSION,
+  BUNDLED_GIT_COMMIT,
+  BUNDLED_WEB_DIST_SHA256,
+} from './bundled-build';
+
+// Compiled CLI discovery manifest
+export { refreshCompiledInstallManifest } from './install-manifest';
+export type { InstallManifest } from './install-manifest';
 
 // Update check
 export {

@@ -15,6 +15,10 @@ sidebar:
 curl -fsSL https://archon.diy/install | bash
 ```
 
+> **x64 compatibility:** Compiled x64 binaries require AVX2. Older Intel/AMD
+> hardware and virtual machines that mask AVX2 cannot use the x64 quick install;
+> use [From Source](#from-source) instead. ARM64 quick installs are unaffected.
+
 ### Windows (PowerShell)
 
 ```powershell
@@ -32,6 +36,34 @@ brew install coleam00/archon/archon
 ```bash
 docker run --rm -v "$PWD:/workspace" ghcr.io/coleam00/archon:latest workflow list
 ```
+
+## Using Archon from a GUI or service
+
+The quick installer and Homebrew install a native, compiled `archon` executable;
+they do not require Bun at runtime. Each compiled invocation records its absolute
+path and version in `<ARCHON_HOME>/install.json`:
+
+```json
+{
+  "binary": "/usr/local/bin/archon",
+  "version": "0.9.0"
+}
+```
+
+Treat this file as a discovery hint, not executable configuration. An explicit
+path configured by the user always wins. Otherwise, read the manifest, require
+`binary` to be an absolute executable path, and launch it directly. If the file
+is absent or invalid, fall back to the documented platform default or ask the
+user to choose a binary. The quick-installer defaults are `/usr/local/bin/archon`
+on macOS/Linux and `%USERPROFILE%\.archon\bin\archon.exe` on Windows; expand
+`%USERPROFILE%` to the user's home directory before invoking the Windows path.
+
+The last compiled Archon invoked updates the record when its path or version
+changes. Quick installers create it during their final version check. Homebrew
+creates it on first use. Source and Bun-linked invocations never write it.
+
+The source-install and `bun link` workflow is for terminal development and
+requires Bun on `PATH`.
 
 ## From Source
 

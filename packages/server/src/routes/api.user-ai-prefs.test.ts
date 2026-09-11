@@ -3,7 +3,7 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ConversationLockManager } from '@archon/core';
 import type { WebAdapter } from '../adapters/web';
 import { validationErrorHook } from './openapi-defaults';
-import { mockAllWorkflowModules } from '../test/workflow-mock-factories';
+import { makeListDashboardRunsMock, mockAllWorkflowModules } from '../test/workflow-mock-factories';
 
 // ---------------------------------------------------------------------------
 // Mock setup — must precede the dynamic import of ./api below. Exercises the
@@ -52,6 +52,7 @@ type Prefs = {
   tiers?: Record<string, Entry>;
   aliases?: Record<string, Entry>;
   defaultProvider?: string;
+  defaultModel?: string;
 };
 let prefsByUser: Record<string, Prefs> = {};
 
@@ -86,10 +87,16 @@ const mockSetAliases = mock(async (userId: string, patch: Record<string, Entry |
     ...(Object.keys(aliases).length ? { aliases } : { aliases: undefined }),
   };
 });
-const mockSetDefault = mock(async (userId: string, provider: string | null) => {
-  const cur = prefsByUser[userId] ?? {};
-  prefsByUser[userId] = { ...cur, defaultProvider: provider ?? undefined };
-});
+const mockSetDefault = mock(
+  async (userId: string, provider: string | null, model: string | null) => {
+    const cur = prefsByUser[userId] ?? {};
+    prefsByUser[userId] = {
+      ...cur,
+      defaultProvider: provider ?? undefined,
+      defaultModel: model ?? undefined,
+    };
+  }
+);
 
 mock.module('@archon/core', () => ({
   handleMessage: mock(async () => {}),
@@ -99,6 +106,7 @@ mock.module('@archon/core', () => ({
   registerRepository: mock(async () => ({ codebaseId: 'x', alreadyExisted: false })),
   ConversationNotFoundError: class ConversationNotFoundError extends Error {},
   generateAndSetTitle: mock(async () => {}),
+  resolveTitleRequest: mock(async () => ({ provider: 'claude', options: {} })),
   isPerUserGitHubEnabled: () => false,
   getArchonWorkspacesPath: () => '/tmp/.archon/workspaces',
   createLogger: noopLogger,
@@ -117,7 +125,7 @@ mock.module('@archon/core', () => ({
   getUserAiPrefs: mockGetPrefs,
   setUserTiers: mockSetTiers,
   setUserAliases: mockSetAliases,
-  setUserDefaultProvider: mockSetDefault,
+  setUserDefault: mockSetDefault,
 }));
 
 mock.module('@archon/paths', () => ({
@@ -162,11 +170,7 @@ mock.module('@archon/core/db/isolation-environments', () => ({
 
 mock.module('@archon/core/db/workflows', () => ({
   listWorkflowRuns: mock(async () => []),
-  listDashboardRuns: mock(async () => ({
-    runs: [],
-    total: 0,
-    counts: { all: 0, running: 0, completed: 0, failed: 0, cancelled: 0, pending: 0 },
-  })),
+  listDashboardRuns: makeListDashboardRunsMock(),
   getWorkflowRun: mock(async () => null),
   getWorkflowRunByWorkerPlatformId: mock(async () => null),
 }));
@@ -182,7 +186,7 @@ mock.module('@archon/core/db/messages', () => ({
 }));
 
 mock.module('@archon/core/utils/commands', () => ({
-  findMarkdownFilesRecursive: mock(async () => []),
+  findCommandFiles: mock(async () => []),
 }));
 
 import { registerApiRoutes } from './api';
@@ -298,10 +302,23 @@ describe('PATCH /api/auth/me/ai-prefs/tiers', () => {
       method: 'PATCH',
       headers: JSON_HEADERS,
       body: JSON.stringify({
-        tiers: { large: { provider: 'claude', model: 'opus', effort: 'ultra' } },
+        tiers: { large: { provider: 'claude', model: 'opus', effort: 'extreme' } },
       }),
     });
     expect(res.status).toBe(400);
+    expect(mockSetTiers).not.toHaveBeenCalled();
+  });
+
+  test('retired thinking config → 400 naming effort', async () => {
+    const res = await makeApp().request('/api/auth/me/ai-prefs/tiers', {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        tiers: { large: { provider: 'claude', model: 'opus', thinking: 'adaptive' } },
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain('effort:');
     expect(mockSetTiers).not.toHaveBeenCalled();
   });
 
@@ -362,26 +379,47 @@ describe('PATCH /api/auth/me/ai-prefs/aliases', () => {
 });
 
 describe('PATCH /api/auth/me/ai-prefs/default', () => {
-  test('sets the default provider', async () => {
+  test('sets the default provider (model pin cleared when omitted)', async () => {
     const res = await makeApp().request('/api/auth/me/ai-prefs/default', {
       method: 'PATCH',
       headers: JSON_HEADERS,
       body: JSON.stringify({ provider: 'claude' }),
     });
     expect(res.status).toBe(200);
-    expect(mockSetDefault).toHaveBeenCalledWith('user-from-alice', 'claude');
+    expect(mockSetDefault).toHaveBeenCalledWith('user-from-alice', 'claude', null);
     expect(await res.json()).toEqual({ defaultProvider: 'claude' });
   });
 
-  test('null clears the default', async () => {
-    prefsByUser['user-from-alice'] = { defaultProvider: 'codex' };
+  test('sets provider + model atomically and echoes both', async () => {
+    const res = await makeApp().request('/api/auth/me/ai-prefs/default', {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ provider: 'codex', model: 'gpt-5.5' }),
+    });
+    expect(res.status).toBe(200);
+    expect(mockSetDefault).toHaveBeenCalledWith('user-from-alice', 'codex', 'gpt-5.5');
+    expect(await res.json()).toEqual({ defaultProvider: 'codex', defaultModel: 'gpt-5.5' });
+  });
+
+  test('null clears the default (provider + model)', async () => {
+    prefsByUser['user-from-alice'] = { defaultProvider: 'codex', defaultModel: 'gpt-5.5' };
     const res = await makeApp().request('/api/auth/me/ai-prefs/default', {
       method: 'PATCH',
       headers: JSON_HEADERS,
       body: JSON.stringify({ provider: null }),
     });
     expect(res.status).toBe(200);
-    expect(mockSetDefault).toHaveBeenCalledWith('user-from-alice', null);
+    expect(mockSetDefault).toHaveBeenCalledWith('user-from-alice', null, null);
+  });
+
+  test('model without provider → 400', async () => {
+    const res = await makeApp().request('/api/auth/me/ai-prefs/default', {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ provider: null, model: 'opus' }),
+    });
+    expect(res.status).toBe(400);
+    expect(mockSetDefault).not.toHaveBeenCalled();
   });
 
   test('unknown provider → 400', async () => {

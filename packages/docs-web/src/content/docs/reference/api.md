@@ -206,7 +206,11 @@ Query parameters:
 
 When `cwd` is omitted, Archon returns bundled default workflows and any from `~/.archon/workflows/` (home-scoped). Project-specific workflows require either the `cwd` query param or a registered codebase, so the endpoint is useful on first launch before any project is registered.
 
-Returns `{ workflows: [...], errors?: [...] }`. The `errors` array contains any YAML parsing failures encountered during discovery.
+Returns `{ workflows: [...], recommended: [...], errors?: [...] }`.
+
+- `workflows[]` — each entry is `{ workflow, source, parseWarnings? }`. `parseWarnings` contains warning messages identifying the keys the engine silently dropped from that workflow's YAML, each with the node it was found on and what to write instead (see [Unknown keys](/guides/authoring-workflows/#unknown-keys-are-reported-not-rejected)); it is **omitted entirely** when the workflow is clean, so its presence alone is the signal.
+- `recommended[]` — repo-owner-curated workflow names from `.archon/config.yaml`, filtered to discovered names and kept in declared order. Empty when there is no project context.
+- `errors[]` — YAML parsing failures encountered during discovery. Unlike `parseWarnings`, these workflows did **not** load.
 
 #### Get a Workflow
 
@@ -265,11 +269,18 @@ Only user-defined workflows can be deleted. Bundled defaults cannot be removed.
 | GET | `/api/runs/{runId}/artifacts` | List artifact files produced by a run |
 | GET | `/api/workflows/runs/by-worker/{platformId}` | Look up a run by worker conversation ID |
 | POST | `/api/workflows/runs/{runId}/cancel` | Cancel a running workflow |
-| POST | `/api/workflows/runs/{runId}/resume` | Resume a failed workflow |
-| POST | `/api/workflows/runs/{runId}/abandon` | Abandon a run (running, paused, or failed) |
-| POST | `/api/workflows/runs/{runId}/approve` | Approve a paused workflow |
-| POST | `/api/workflows/runs/{runId}/reject` | Reject a paused workflow |
+| POST | `/api/workflows/runs/{runId}/resume` | Resume a failed or paused workflow |
+| POST | `/api/workflows/runs/{runId}/abandon` | Abandon a run (running, paused, or failed); cascade-cancels non-terminal `workflow:` sub-run descendants |
+| POST | `/api/workflows/runs/{runId}/approve` | Approve a paused workflow (400 if paused blocked on a `workflow:` child — approve the child) |
+| POST | `/api/workflows/runs/{runId}/reject` | Reject a paused workflow (400 if paused blocked on a `workflow:` child — reject the child) |
 | DELETE | `/api/workflows/runs/{runId}` | Delete a terminal run and its events |
+
+Run responses expose `status` and `outcome` as separate fields. `status` is the execution
+lifecycle. `outcome` is the workflow-authored verdict (`"succeeded"`, `"failed"`, or `null`) and
+is never derived by the API from status or output text. Contradictory combinations are valid: for
+example, `{"status":"completed","outcome":"failed"}` means execution finished but the workflow
+rejected its result. `null` means no verdict has been authored, including undeclared and historical
+runs. The list, detail, by-worker, and dashboard run endpoints preserve both fields.
 
 #### Run a Workflow
 
@@ -287,6 +298,64 @@ curl -X POST http://localhost:3090/api/workflows/archon-assist/run \
   -F "files=@screenshot.png"
 ```
 
+**Supplying declared inputs.** A workflow that declares [`inputs:`](/guides/authoring-workflows/#running-a-workflow-that-declares-inputs) takes their values through an optional `inputs` map — a flat object of string values. Omit a name to take its declared `default:`.
+
+```bash
+# JSON: inputs is a nested object
+curl -X POST http://localhost:3090/api/workflows/review-block/run \
+  -H "Content-Type: application/json" \
+  -d '{"message": "review it", "conversationId": "conv-123",
+       "inputs": {"diff": "...", "style": "terse"}}'
+
+# multipart: form fields are strings, so the same map travels JSON-encoded
+curl -X POST http://localhost:3090/api/workflows/review-block/run \
+  -F "conversationId=conv-123" \
+  -F "message=review it" \
+  -F 'inputs={"diff":"...","style":"terse"}' \
+  -F "files=@context.md"
+```
+
+Values are validated against the workflow's declaration before any worktree, clone, or AI cost: a missing **required** input and an **undeclared** name are both refused up front, through the same contract a composing `with:` map goes through. `400` if `inputs` is not an object of strings (or, on multipart, not valid JSON). An empty object is the same as omitting the field.
+
+**Rebinding models for one run.** Optional `tiers` and `aliases` maps change only the named tier or existing `@alias` for this invocation. Every other binding keeps its normal user → repo → global → built-in value.
+
+```bash
+# JSON: only `large` changes
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -H "Content-Type: application/json" \
+  -d '{"message":"fix #2481","conversationId":"conv-123",
+       "tiers":{"large":"openai/gpt-5.6"},
+       "aliases":{"@reviewer":"codex/gpt-5.6-sol"}}'
+
+# multipart: each map is one JSON-encoded form field
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -F "conversationId=conv-123" \
+  -F "message=fix #2481" \
+  -F 'tiers={"large":"openai/gpt-5.6"}'
+```
+
+Tier keys are `small`, `medium`, and `large`; alias keys start with `@`. A model spec can name an Archon agent/model, a Pi vendor/model, an unqualified model under the binding's current provider, or another tier/alias preset. Literal model pins in the workflow remain unchanged. To replace all default tiers, author all three mappings explicitly. The run's `metadata.model_bindings` records the effective non-secret bindings for attribution and the sparse resolved overrides for reuse on resume.
+
+**Loading inline config for one run.** Optional `config` content uses the same sparse runtime keys as a CLI run config file. JSON sends it as an object; multipart sends the object JSON-encoded in one form field. Explicit `tiers` and `aliases` fields are the final model layer and replace only matching names from `config`.
+
+```bash
+# JSON content
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -H "Content-Type: application/json" \
+  -d '{"message":"fix #2482","conversationId":"conv-123",
+       "config":{"tiers":{"large":{"provider":"pi","model":"minimax/MiniMax-M3"}},
+                 "env":{"BENCH_MODE":"1"}},
+       "tiers":{"large":"openai/gpt-5.6"}}'
+
+# multipart content
+curl -X POST http://localhost:3090/api/workflows/issue-to-pr/run \
+  -F "conversationId=conv-123" \
+  -F "message=fix #2482" \
+  -F 'config={"docs":{"path":"handbook"},"workflows":{"quotaMaxAttempts":3}}'
+```
+
+Supported inline keys are `assistant` or `defaultAssistant`, `assistants`, `tiers`, `aliases`, `workflows`, `docs.path`, and `env`. Unknown or ineffective keys fail with `400` and name the key. `configPath` is always rejected: HTTP callers cannot ask the server to read a filesystem path. Run metadata stores sealed replay content plus redacted source/key attribution, and resume uses the original layer without accepting replacement content.
+
 #### List Run Artifacts
 
 ```bash
@@ -295,7 +364,7 @@ curl http://localhost:3090/api/runs/{runId}/artifacts
 
 Walks the run's on-disk artifact directory (dotfiles skipped) and returns `{ files: [{ path, size, modifiedAt }] }`. Used by the console UI's Artifacts tab. Returns `{ files: [] }` when the run has no codebase or the codebase name is not in `owner/repo` form; 400 on invalid run id or path-escape attempt, 404 if the run does not exist.
 
-#### Resume a Failed Run
+#### Resume a Failed or Paused Run
 
 ```bash
 curl -X POST http://localhost:3090/api/workflows/runs/{runId}/resume
@@ -316,6 +385,8 @@ curl -X POST http://localhost:3090/api/workflows/runs/{runId}/reject \
   -H "Content-Type: application/json" \
   -d '{"reason": "Please add error handling first"}'
 ```
+
+**Sub-run child gates (#2121 Phase 2):** when a `workflow:` sub-run pauses at its own gate, its parent run pauses "blocked on child". Approve/reject the **child** run (its id is in the parent's block message) — the parent auto-resumes when the child completes. A child gate is the exception: it works for a 1:1 sub-run, but a child that pauses inside a `fan_out:` expansion **fails the node** instead — a parent has one approval slot and cannot hand it to N children, so gate before or after the fan-out node rather than inside a child of it. Calling approve/reject on the *parent's* id while it is blocked on a child returns **400** with a redirect to the child id. `abandon` on a parent cascade-cancels its non-terminal sub-run descendants; the response's `cascadeFailures` is non-zero if part of the tree could not be reached, and `blockedParentRunId` is set when the abandoned run was itself a child stranding a paused parent.
 
 ---
 
@@ -343,6 +414,13 @@ Returns `{ commands: [{ name, source: "bundled" | "project" }] }`.
 | GET | `/api/dashboard/runs` | List enriched workflow runs for the dashboard |
 
 Query parameters include status filters, date ranges, and pagination. Used by the Command Center UI.
+
+Each run includes `active_nodes`, ordered by unresolved `node_started` event order. Completion,
+failure, and both skip lifecycle events remove a node; a retrying start adds it again. Concurrent
+nodes remain separate entries. The compatibility fields `current_step_name` and
+`current_step_status` are populated only when exactly one node is active, and are `null` for zero
+or multiple active nodes. `total_steps` is `null`; observed lifecycle events do not define the
+workflow's total node count. This state describes node lifecycle, not process-owner liveness.
 
 ---
 
@@ -396,7 +474,7 @@ Each user can override the install-wide model config with **personal** tiers, `@
 | GET | `/api/auth/me/ai-prefs` | The current user's stored prefs (raw layer, not merged) |
 | PATCH | `/api/auth/me/ai-prefs/tiers` | Update personal tier presets (per-key merge; `null` unsets) |
 | PATCH | `/api/auth/me/ai-prefs/aliases` | Update personal `@custom` aliases (per-key merge; `null` unsets) |
-| PATCH | `/api/auth/me/ai-prefs/default` | Set (or clear with `null`) the personal default assistant |
+| PATCH | `/api/auth/me/ai-prefs/default` | Set (or clear with `null`) the personal default assistant + default chat model (`{ provider, model? }` — written atomically; an omitted `model` clears any pin, and `model` without a `provider` is rejected) |
 
 ```bash
 # Point YOUR `large` tier at opus without touching the install config

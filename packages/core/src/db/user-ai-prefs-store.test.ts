@@ -1,7 +1,8 @@
 import { mock, describe, test, expect, beforeEach } from 'bun:test';
-import { createQueryResult, mockPostgresDialect } from '../test/mocks/database';
+import { createMockQuery, createQueryResult, mockPostgresDialect } from '../test/mocks/database';
 
-const mockQuery = mock(() => Promise.resolve(createQueryResult([])));
+const mockQuery = createMockQuery();
+const mockLogError = mock(() => {});
 
 mock.module('./connection', () => ({
   pool: { query: mockQuery },
@@ -12,7 +13,7 @@ mock.module('@archon/paths', () => ({
   createLogger: mock(() => ({
     info: mock(() => {}),
     warn: mock(() => {}),
-    error: mock(() => {}),
+    error: mockLogError,
     debug: mock(() => {}),
     trace: mock(() => {}),
     fatal: mock(() => {}),
@@ -23,7 +24,7 @@ import {
   getUserAiPrefs,
   setUserTiers,
   setUserAliases,
-  setUserDefaultProvider,
+  setUserDefault,
   clearUserAiPrefs,
 } from './user-ai-prefs-store';
 
@@ -36,6 +37,7 @@ function prefsRow(overrides: Partial<Record<string, unknown>> = {}): Record<stri
     tiers: null,
     aliases: null,
     default_provider: null,
+    default_model: null,
     created_at: '2026-06-11T00:00:00Z',
     updated_at: '2026-06-11T00:00:00Z',
     ...overrides,
@@ -45,6 +47,7 @@ function prefsRow(overrides: Partial<Record<string, unknown>> = {}): Record<stri
 describe('user-ai-prefs-store', () => {
   beforeEach(() => {
     mockQuery.mockClear();
+    mockLogError.mockClear();
   });
 
   describe('getUserAiPrefs', () => {
@@ -54,21 +57,23 @@ describe('user-ai-prefs-store', () => {
       expect(mockQuery.mock.calls[0][1]).toEqual([USER]);
     });
 
-    test('parses JSON columns and default_provider', async () => {
+    test('parses JSON columns, default_provider, and default_model', async () => {
       mockQuery.mockResolvedValueOnce(
         createQueryResult([
           prefsRow({
             tiers: JSON.stringify({ large: { provider: 'claude', model: 'opus' } }),
-            aliases: JSON.stringify({ '@fast': { provider: 'codex', model: 'gpt-5.3-codex' } }),
+            aliases: JSON.stringify({ '@fast': { provider: 'codex', model: 'gpt-5.6-sol' } }),
             default_provider: 'codex',
+            default_model: 'gpt-5.5',
           }),
         ])
       );
       const result = await getUserAiPrefs(USER);
       expect(result).toEqual({
         tiers: { large: { provider: 'claude', model: 'opus' } },
-        aliases: { '@fast': { provider: 'codex', model: 'gpt-5.3-codex' } },
+        aliases: { '@fast': { provider: 'codex', model: 'gpt-5.6-sol' } },
         defaultProvider: 'codex',
+        defaultModel: 'gpt-5.5',
       });
     });
 
@@ -82,6 +87,7 @@ describe('user-ai-prefs-store', () => {
       expect(result.tiers).toEqual({ small: { provider: 'claude', model: 'haiku' } });
       expect(result.aliases).toBeUndefined();
       expect(result.defaultProvider).toBeUndefined();
+      expect(result.defaultModel).toBeUndefined();
     });
 
     test('treats a corrupt JSON column as unset', async () => {
@@ -89,6 +95,44 @@ describe('user-ai-prefs-store', () => {
       const result = await getUserAiPrefs(USER);
       expect(result.tiers).toBeUndefined();
     });
+
+    test.each(['tiers', 'aliases'] as const)(
+      'treats retired thinking in stored %s as unset without discarding other preferences',
+      async column => {
+        const otherColumn = column === 'tiers' ? 'aliases' : 'tiers';
+        const invalid =
+          column === 'tiers'
+            ? { medium: { provider: 'claude', model: 'sonnet', thinking: 'adaptive' } }
+            : { '@deep': { provider: 'claude', model: 'opus', thinking: 'adaptive' } };
+        const valid =
+          otherColumn === 'tiers'
+            ? { small: { provider: 'claude', model: 'haiku' } }
+            : { '@fast': { provider: 'codex', model: 'gpt-5.6-sol' } };
+        mockQuery.mockResolvedValueOnce(
+          createQueryResult([
+            prefsRow({
+              [column]: JSON.stringify(invalid),
+              [otherColumn]: JSON.stringify(valid),
+              default_provider: 'codex',
+              default_model: 'gpt-5.5',
+            }),
+          ])
+        );
+
+        const result = await getUserAiPrefs(USER);
+
+        expect(result[column]).toBeUndefined();
+        expect(result[otherColumn]).toEqual(valid);
+        expect(result.defaultProvider).toBe('codex');
+        expect(result.defaultModel).toBe('gpt-5.5');
+        const [{ err, column: loggedColumn }, event] = mockLogError.mock.calls.at(
+          -1
+        ) as unknown as [{ err: Error; column: string }, string];
+        expect(event).toBe('db.user_ai_prefs_validation_failed');
+        expect(loggedColumn).toBe(column);
+        expect(err.message).toMatch(/thinking.*effort:/);
+      }
+    );
   });
 
   describe('setUserTiers', () => {
@@ -126,7 +170,7 @@ describe('user-ai-prefs-store', () => {
         createQueryResult([
           prefsRow({
             aliases: JSON.stringify({
-              '@fast': { provider: 'codex', model: 'gpt-5.3-codex' },
+              '@fast': { provider: 'codex', model: 'gpt-5.6-sol' },
               '@deep': { provider: 'claude', model: 'opus' },
             }),
           }),
@@ -145,19 +189,30 @@ describe('user-ai-prefs-store', () => {
     });
   });
 
-  describe('setUserDefaultProvider', () => {
-    test('upserts the default_provider column', async () => {
-      await setUserDefaultProvider(USER, 'codex');
+  describe('setUserDefault', () => {
+    test('upserts default_provider and default_model atomically', async () => {
+      await setUserDefault(USER, 'codex', 'gpt-5.5');
       const [sql, params] = mockQuery.mock.calls[0] as unknown as [string, unknown[]];
-      expect(sql).toContain('ON CONFLICT (user_id) DO UPDATE SET default_provider');
+      expect(sql).toContain(
+        'ON CONFLICT (user_id) DO UPDATE SET default_provider = $3, default_model = $4'
+      );
       expect(params[1]).toBe(USER);
       expect(params[2]).toBe('codex');
+      expect(params[3]).toBe('gpt-5.5');
     });
 
-    test('null clears the default', async () => {
-      await setUserDefaultProvider(USER, null);
+    test('provider without model clears any previous model pin', async () => {
+      await setUserDefault(USER, 'codex', null);
+      const [, params] = mockQuery.mock.calls[0] as unknown as [string, unknown[]];
+      expect(params[2]).toBe('codex');
+      expect(params[3]).toBeNull();
+    });
+
+    test('null clears both columns', async () => {
+      await setUserDefault(USER, null, null);
       const [, params] = mockQuery.mock.calls[0] as unknown as [string, unknown[]];
       expect(params[2]).toBeNull();
+      expect(params[3]).toBeNull();
     });
   });
 

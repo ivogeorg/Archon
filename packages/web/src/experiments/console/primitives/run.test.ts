@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
-import { toRun, normalizeOrigin } from './run';
+import { toRun, normalizeOrigin, runMessageConversationId } from './run';
+import { runStatusLabel } from '../lib/run-status';
 
 type Raw = Parameters<typeof toRun>[0];
 
@@ -34,6 +35,77 @@ describe('normalizeOrigin', () => {
 });
 
 describe('toRun — provenance', () => {
+  test('keeps parallel active nodes without inventing a singular representative', () => {
+    const parallel = toRun(
+      raw({
+        id: 'r-parallel',
+        workflow_name: 'implement',
+        status: 'running',
+        active_nodes: ['parallel-a', 'parallel-b'],
+        current_step_name: 'parallel-a',
+      })
+    );
+    const singular = toRun(
+      raw({
+        id: 'r-singular',
+        workflow_name: 'implement',
+        status: 'running',
+        active_nodes: ['plan'],
+      })
+    );
+
+    expect(parallel.activeNodes).toEqual(['parallel-a', 'parallel-b']);
+    expect(parallel.currentNode).toBeNull();
+    expect(singular.activeNodes).toEqual(['plan']);
+    expect(singular.currentNode).toBe('plan');
+  });
+
+  test('detail responses without active_nodes normalize to empty active state', () => {
+    const detail = toRun(raw({ id: 'r-detail', workflow_name: 'plan', status: 'running' }));
+
+    expect(detail.activeNodes).toEqual([]);
+    expect(detail.currentNode).toBeNull();
+  });
+
+  test('keeps authored outcome independent from execution status', () => {
+    const completedWithSucceededOutcome = toRun(
+      raw({
+        id: 'r0',
+        workflow_name: 'review',
+        status: 'completed',
+        outcome: 'succeeded',
+      })
+    );
+    const completedWithFailedOutcome = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'review',
+        status: 'completed',
+        outcome: 'failed',
+      })
+    );
+    const pausedWithSucceededOutcome = toRun(
+      raw({
+        id: 'r2',
+        workflow_name: 'review',
+        status: 'paused',
+        outcome: 'succeeded',
+      })
+    );
+
+    expect(completedWithSucceededOutcome.status).toBe('completed');
+    expect(completedWithSucceededOutcome.outcome).toBe('succeeded');
+    expect(completedWithFailedOutcome.status).toBe('completed');
+    expect(completedWithFailedOutcome.outcome).toBe('failed');
+    expect(pausedWithSucceededOutcome.status).toBe('paused');
+    expect(pausedWithSucceededOutcome.outcome).toBe('succeeded');
+  });
+
+  test('normalizes an absent authored outcome to null', () => {
+    const r = toRun(raw({ id: 'r1', workflow_name: 'plan', status: 'completed' }));
+    expect(r.outcome).toBeNull();
+  });
+
   test('userMessage defaults to empty string when absent', () => {
     const r = toRun(raw({ id: 'r1', workflow_name: 'plan', status: 'running' }));
     expect(r.userMessage).toBe('');
@@ -65,6 +137,22 @@ describe('toRun — provenance', () => {
     expect(r.conversationPlatformId).toBe('cli-detail-789');
   });
 
+  test('worker_platform_id maps through for chat-dispatched runs; absent → null', () => {
+    const web = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'plan',
+        status: 'completed',
+        worker_platform_id: 'web-worker-123-abc',
+      })
+    );
+    expect(web.workerPlatformId).toBe('web-worker-123-abc');
+    expect(web.conversationPlatformId).toBeNull();
+
+    const bare = toRun(raw({ id: 'r2', workflow_name: 'plan', status: 'completed' }));
+    expect(bare.workerPlatformId).toBeNull();
+  });
+
   test("normalizes the transient 'pending' status to running", () => {
     const r = toRun(raw({ id: 'r1', workflow_name: 'plan', status: 'pending' }));
     expect(r.status).toBe('running');
@@ -73,6 +161,55 @@ describe('toRun — provenance', () => {
   test('an unrecognised status falls back to running', () => {
     const r = toRun(raw({ id: 'r1', workflow_name: 'plan', status: 'banana' }));
     expect(r.status).toBe('running');
+  });
+});
+
+describe('runMessageConversationId', () => {
+  test('CLI run: uses conversationPlatformId (unchanged behavior)', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'plan',
+        status: 'completed',
+        conversation_platform_id: 'cli-1776237248436-q61o4h',
+      })
+    );
+    expect(runMessageConversationId(r)).toBe('cli-1776237248436-q61o4h');
+  });
+
+  test('chat-dispatched run: falls back to the worker conversation (#2048)', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'plan',
+        status: 'completed',
+        conversation_platform_id: null,
+        worker_platform_id: 'web-worker-1784559376043-8p44vw',
+      })
+    );
+    expect(runMessageConversationId(r)).toBe('web-worker-1784559376043-8p44vw');
+  });
+
+  test('prefers conversationPlatformId when both are present', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'plan',
+        status: 'completed',
+        conversation_platform_id: 'cli-abc',
+        worker_platform_id: 'web-worker-xyz',
+      })
+    );
+    expect(runMessageConversationId(r)).toBe('cli-abc');
+  });
+
+  test('list-sourced row (neither field) → null, message fetching stays off', () => {
+    const r = toRun(raw({ id: 'r1', workflow_name: 'plan', status: 'running' }));
+    expect(runMessageConversationId(r)).toBeNull();
+  });
+
+  test('not-yet-loaded run (undefined) → null', () => {
+    expect(runMessageConversationId(undefined)).toBeNull();
   });
 });
 
@@ -121,7 +258,33 @@ describe('toRun — approval parsing', () => {
         metadata: { approval: { nodeId: 'gate', message: 'Approve?' } },
       })
     );
-    expect(r.approval).toEqual({ nodeId: 'gate', message: 'Approve?' });
+    expect(r.approval).toEqual({
+      nodeId: 'gate',
+      message: 'Approve?',
+      completionSignaled: false,
+      decisions: [{ id: 'approve' }, { id: 'reject' }],
+      decisionsAuthored: false,
+    });
+  });
+
+  test('surfaces completionSignaled on a signal-bearing interactive-loop gate (#2074)', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'validate',
+        status: 'paused',
+        metadata: {
+          approval: {
+            nodeId: 'refine',
+            message: 'gate',
+            type: 'interactive_loop',
+            completionSignaled: true,
+            signaledOutput: 'REPORT',
+          },
+        },
+      })
+    );
+    expect(r.approval?.completionSignaled).toBe(true);
   });
 
   test('defaults message to empty string when only nodeId is present', () => {
@@ -133,7 +296,13 @@ describe('toRun — approval parsing', () => {
         metadata: { approval: { nodeId: 'gate' } },
       })
     );
-    expect(r.approval).toEqual({ nodeId: 'gate', message: '' });
+    expect(r.approval).toEqual({
+      nodeId: 'gate',
+      message: '',
+      completionSignaled: false,
+      decisions: [{ id: 'approve' }, { id: 'reject' }],
+      decisionsAuthored: false,
+    });
   });
 
   test('approval is null when absent or malformed (no string nodeId)', () => {
@@ -149,4 +318,212 @@ describe('toRun — approval parsing', () => {
       ).approval
     ).toBeNull();
   });
+});
+
+describe('toRun — resolved gate (approved/rejected awaiting resume)', () => {
+  test('resolved approval hides the pending gate and sets gateResolved', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'review',
+        status: 'paused',
+        metadata: { approval: { nodeId: 'gate', message: 'Approve?', resolved: 'approved' } },
+      })
+    );
+    // No stale approve/reject buttons for an already-resolved gate.
+    expect(r.approval).toBeNull();
+    expect(r.gateResolved).toBe('approved');
+  });
+
+  test('resolved rejection maps to gateResolved: rejected', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'review',
+        status: 'paused',
+        metadata: { approval: { nodeId: 'gate', message: 'Approve?', resolved: 'rejected' } },
+      })
+    );
+    expect(r.approval).toBeNull();
+    expect(r.gateResolved).toBe('rejected');
+  });
+
+  test('explicit null resolved (fresh pause) keeps the gate pending', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'review',
+        status: 'paused',
+        metadata: { approval: { nodeId: 'gate', message: 'Approve?', resolved: null } },
+      })
+    );
+    expect(r.approval).toEqual({
+      nodeId: 'gate',
+      message: 'Approve?',
+      completionSignaled: false,
+      decisions: [{ id: 'approve' }, { id: 'reject' }],
+      decisionsAuthored: false,
+    });
+    expect(r.gateResolved).toBeNull();
+  });
+
+  test('unknown resolved values are treated as unresolved', () => {
+    const r = toRun(
+      raw({
+        id: 'r1',
+        workflow_name: 'review',
+        status: 'paused',
+        metadata: { approval: { nodeId: 'gate', message: 'Approve?', resolved: 'weird' } },
+      })
+    );
+    expect(r.approval).toEqual({
+      nodeId: 'gate',
+      message: 'Approve?',
+      completionSignaled: false,
+      decisions: [{ id: 'approve' }, { id: 'reject' }],
+      decisionsAuthored: false,
+    });
+    expect(r.gateResolved).toBeNull();
+  });
+});
+
+describe('toRun — durable wait', () => {
+  type RawWait = NonNullable<NonNullable<Raw['metadata']>['wait']>;
+  type NormalizedWait = NonNullable<ReturnType<typeof toRun>['wait']>;
+
+  const waitingSince = '2026-08-25T09:00:00.000Z';
+  const resumeAt = '2026-08-25T10:00:00.000Z';
+  const cases: Array<{
+    name: string;
+    wait: RawWait;
+    expected: NormalizedWait;
+    label: string;
+  }> = [
+    {
+      name: 'node time',
+      wait: { owner: 'node', nodeId: 'delay', kind: 'time', waitingSince, resumeAt },
+      expected: { nodeId: 'delay', kind: 'time', waitingSince, resumeAt },
+      label: 'Waiting until scheduled time',
+    },
+    {
+      name: 'node event',
+      wait: {
+        owner: 'node',
+        nodeId: 'checks',
+        kind: 'event',
+        waitingSince,
+        resumeAt,
+        event: 'checks.complete',
+        signaledAt: resumeAt,
+        payload: { conclusion: 'success' },
+      },
+      expected: {
+        nodeId: 'checks',
+        kind: 'event',
+        waitingSince,
+        resumeAt,
+        event: 'checks.complete',
+        signaledAt: resumeAt,
+        payload: { conclusion: 'success' },
+      },
+      label: 'Waiting for event',
+    },
+    {
+      name: 'node attention',
+      wait: {
+        owner: 'node',
+        nodeId: 'rerun-ci',
+        kind: 'attention',
+        waitingSince,
+        message: 'Re-run CI, then resume.',
+      },
+      expected: {
+        nodeId: 'rerun-ci',
+        kind: 'attention',
+        waitingSince,
+        message: 'Re-run CI, then resume.',
+      },
+      label: 'Waiting for action',
+    },
+    {
+      name: 'loop-group time',
+      wait: {
+        owner: 'loop_group',
+        nodeId: 'poll',
+        bodyWaitId: 'delay',
+        iteration: 2,
+        sessionId: null,
+        sessionProvider: null,
+        kind: 'time',
+        waitingSince,
+        resumeAt,
+      },
+      expected: { nodeId: 'poll.delay', kind: 'time', waitingSince, resumeAt },
+      label: 'Waiting until scheduled time',
+    },
+    {
+      name: 'loop-group event',
+      wait: {
+        owner: 'loop_group',
+        nodeId: 'poll',
+        bodyWaitId: 'checks',
+        iteration: 3,
+        sessionId: 'session-1',
+        sessionProvider: 'claude',
+        kind: 'event',
+        waitingSince,
+        resumeAt,
+        event: 'checks.complete',
+      },
+      expected: {
+        nodeId: 'poll.checks',
+        kind: 'event',
+        waitingSince,
+        resumeAt,
+        event: 'checks.complete',
+      },
+      label: 'Waiting for event',
+    },
+    {
+      name: 'loop-group attention',
+      wait: {
+        owner: 'loop_group',
+        nodeId: 'recover-ci',
+        bodyWaitId: 'pause',
+        iteration: 14,
+        sessionId: null,
+        sessionProvider: null,
+        kind: 'attention',
+        waitingSince,
+        message: 'Re-run CI, then resume.',
+      },
+      expected: {
+        nodeId: 'recover-ci.pause',
+        kind: 'attention',
+        waitingSince,
+        message: 'Re-run CI, then resume.',
+      },
+      label: 'Waiting for action',
+    },
+  ];
+
+  for (const waitCase of cases) {
+    test(`normalizes ${waitCase.name} from the generated wait contract`, () => {
+      const r = toRun(
+        raw({
+          id: 'r1',
+          workflow_name: 'durable-wait',
+          status: 'paused',
+          metadata: {
+            approval: { nodeId: 'old-gate', message: 'Stale approval' },
+            wait: waitCase.wait,
+          },
+        })
+      );
+
+      expect(r.wait).toEqual(waitCase.expected);
+      expect(r.approval).toBeNull();
+      expect(runStatusLabel(r)).toBe(waitCase.label);
+    });
+  }
 });

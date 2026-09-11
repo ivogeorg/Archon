@@ -1,9 +1,14 @@
+import { terminalRecordSchema } from '@archon/workflows/schemas/terminal-record';
 /**
  * Zod schemas for workflow API endpoints.
  */
 import { z } from '@hono/zod-openapi';
 import { workflowDefinitionSchema as engineWorkflowDefinitionSchema } from '@archon/workflows/schemas/workflow';
-import { workflowRunSchema as engineWorkflowRunSchema } from '@archon/workflows/schemas/workflow-run';
+import {
+  workflowRunSchema as engineWorkflowRunSchema,
+  workflowRunOutcomeSchema as engineWorkflowRunOutcomeSchema,
+  workflowWaitContextSchema as engineWorkflowWaitContextSchema,
+} from '@archon/workflows/schemas/workflow-run';
 import { workflowEventRowSchema } from '@archon/core/schemas/workflow-event';
 import { dashboardWorkflowRunSchema as coreDashboardWorkflowRunSchema } from '@archon/core/schemas/workflow-run';
 
@@ -33,6 +38,12 @@ export const workflowListEntrySchema = z
   .object({
     workflow: workflowDefinitionSchema,
     source: workflowSourceSchema,
+    /**
+     * Non-fatal warnings raised while parsing this workflow's YAML — today, keys
+     * the engine silently drops (#2213). The workflow still loads and runs;
+     * these tell the author what was ignored. Omitted when there are none.
+     */
+    parseWarnings: z.array(z.string()).optional(),
   })
   .openapi('WorkflowListEntry');
 
@@ -103,9 +114,26 @@ export const workflowRunStatusSchema = z
   .enum(['pending', 'running', 'completed', 'failed', 'cancelled', 'paused'])
   .openapi('WorkflowRunStatus');
 
+/** Workflow-authored verdict, independent from lifecycle status. */
+export const workflowRunOutcomeSchema = engineWorkflowRunOutcomeSchema
+  .nullable()
+  .openapi('WorkflowRunOutcome');
+
+/** Persisted durable-wait cursor exposed to API clients without erasing its discriminants. */
+export const workflowWaitContextSchema =
+  engineWorkflowWaitContextSchema.openapi('WorkflowWaitContext');
+
+/** Run metadata stays open-ended, but its durable-wait contract is engine-owned and typed. */
+export const workflowRunMetadataSchema = z
+  .object({ wait: workflowWaitContextSchema.optional() })
+  .catchall(z.unknown())
+  .openapi('WorkflowRunMetadata');
+
 /** A workflow run record (wire shape with ISO string dates). */
 export const workflowRunSchema = engineWorkflowRunSchema
   .extend({
+    outcome: workflowRunOutcomeSchema,
+    metadata: workflowRunMetadataSchema,
     started_at: z.string(),
     completed_at: z.string().nullable(),
     last_activity_at: z.string().nullable(),
@@ -131,6 +159,7 @@ export const workflowRunDetailSchema = z
       worker_platform_id: z.string().optional(),
       parent_platform_id: z.string().optional(),
       conversation_platform_id: z.string().nullable(),
+      terminal_record: terminalRecordSchema.nullable(),
     }),
     events: z.array(workflowEventSchema),
   })
@@ -160,6 +189,15 @@ export const approveWorkflowRunBodySchema = z
 export const rejectWorkflowRunBodySchema = z
   .object({ reason: z.string().optional() })
   .openapi('RejectWorkflowRunBody');
+
+/**
+ * POST /api/workflows/runs/:runId/respond request body (#2707 step 2). `decision` must be
+ * one of the paused gate's declared decisions; `approve`/`reject` are sugar for the same
+ * outcome the dedicated routes above produce.
+ */
+export const respondWorkflowRunBodySchema = z
+  .object({ decision: z.string().min(1), text: z.string().optional() })
+  .openapi('RespondWorkflowRunBody');
 
 /** DELETE /api/workflows/:name/node-sessions path params. */
 export const resetWorkflowNodeSessionsParamsSchema = z
@@ -192,6 +230,7 @@ export const resetWorkflowNodeSessionsResponseSchema = z
 /** Dashboard enriched workflow run (wire shape with ISO string dates). */
 export const dashboardWorkflowRunSchema = coreDashboardWorkflowRunSchema
   .extend({
+    metadata: workflowRunMetadataSchema,
     started_at: z.string(),
     completed_at: z.string().nullable(),
     last_activity_at: z.string().nullable(),
@@ -214,14 +253,6 @@ export const dashboardRunsResponseSchema = z
     }),
   })
   .openapi('DashboardRunsResponse');
-
-/** POST /api/workflows/:name/run request body. */
-export const runWorkflowBodySchema = z
-  .object({
-    conversationId: z.string(),
-    message: z.string(),
-  })
-  .openapi('RunWorkflowBody');
 
 /** A single artifact file listed by GET /api/runs/:runId/artifacts. */
 export const artifactFileSchema = z
@@ -262,4 +293,7 @@ export const workflowRunsQuerySchema = z.object({
   // when an identity resolves. Default lists everything. Enum makes the boolean
   // contract explicit (the handler treats only 'true' as on).
   mine: z.enum(['true', 'false']).optional(),
+  // Open-work inbox (#2747): 'true' lists terminal failed runs nothing has
+  // adopted or superseded. Mutually exclusive with status/conversationId.
+  open: z.enum(['true', 'false']).optional(),
 });

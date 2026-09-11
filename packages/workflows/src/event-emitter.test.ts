@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, spyOn } from 'bun:test';
+import { describe, it, expect, mock, beforeEach } from 'bun:test';
 
 // --- Mock logger (MUST come before imports of modules under test) ---
 // event-emitter.ts uses a lazy-initialized logger via getLog(), so we must
@@ -39,6 +39,7 @@ function makeWorkflowStartedEvent(runId = 'run-1'): WorkflowEmitterEvent {
     runId,
     workflowName: 'test-workflow',
     conversationId: 'conv-1',
+    transcriptPath: `/logs/${runId}.jsonl`,
   };
 }
 
@@ -76,6 +77,7 @@ function makeNodeSkippedEvent(runId = 'run-1'): WorkflowEmitterEvent {
     nodeId: 'skip-me',
     nodeName: 'optional-node',
     reason: 'when_condition',
+    cause: { kind: 'condition', expr: '$route.output == true' },
   };
 }
 
@@ -83,7 +85,7 @@ function makeArtifactEvent(runId = 'run-1'): WorkflowEmitterEvent {
   return {
     type: 'workflow_artifact',
     runId,
-    artifactType: 'log',
+    artifactType: 'file_created',
     label: 'Execution log',
     path: '/tmp/workflow.log',
   };
@@ -601,6 +603,7 @@ describe('WorkflowEventEmitter', () => {
         runId,
         workflowName: 'plan-implement',
         conversationId,
+        transcriptPath: `/logs/${runId}.jsonl`,
       });
       emitter.emit({ type: 'node_started', runId, nodeId: 'plan', nodeName: 'plan' });
       emitter.emit({
@@ -614,7 +617,7 @@ describe('WorkflowEventEmitter', () => {
       emitter.emit({
         type: 'workflow_artifact',
         runId,
-        artifactType: 'log',
+        artifactType: 'file_created',
         label: 'build output',
         path: '/tmp/out.log',
       });
@@ -661,11 +664,11 @@ describe('WorkflowEventEmitter', () => {
   });
 
   // -------------------------------------------------------------------------
-  // NodeStartedEvent optional model fields (provider/model/tier)
+  // NodeStartedEvent optional model fields (provider/model/tier/effort)
   // -------------------------------------------------------------------------
 
   describe('NodeStartedEvent — optional model fields', () => {
-    it('passes through an event with no provider/model/tier (bash/script-like)', () => {
+    it('passes through an event with no provider/model/tier/effort (bash/script-like)', () => {
       const emitter = getWorkflowEventEmitter();
       const received: WorkflowEmitterEvent[] = [];
       emitter.subscribe(e => received.push(e));
@@ -677,6 +680,7 @@ describe('WorkflowEventEmitter', () => {
       expect(evt.provider).toBeUndefined();
       expect(evt.model).toBeUndefined();
       expect(evt.tier).toBeUndefined();
+      expect(evt.effort).toBeUndefined();
     });
 
     it('passes through provider/model/tier for tier-resolved AI nodes', () => {
@@ -692,12 +696,14 @@ describe('WorkflowEventEmitter', () => {
         provider: 'claude',
         model: 'opus',
         tier: 'large',
+        effort: 'max',
       });
 
       const evt = received[0] as Extract<WorkflowEmitterEvent, { type: 'node_started' }>;
       expect(evt.provider).toBe('claude');
       expect(evt.model).toBe('opus');
       expect(evt.tier).toBe('large');
+      expect(evt.effort).toBe('max');
     });
 
     it('passes through provider/model without tier for literal-model AI nodes', () => {

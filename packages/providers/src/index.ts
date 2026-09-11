@@ -6,6 +6,7 @@ export type {
   NodeConfig,
   ProviderDefaults,
   ProviderDefaultsMap,
+  ProviderRunConfigParser,
   ProviderCapabilities,
   ProviderRegistration,
   ProviderInfo,
@@ -26,6 +27,7 @@ export {
   getAgentProvider,
   getRegistration,
   getProviderCapabilities,
+  parseProviderRunModel,
   getRegisteredProviders,
   getProviderInfoList,
   isRegisteredProvider,
@@ -35,11 +37,12 @@ export {
 } from './registry';
 
 // Error
-export { UnknownProviderError } from './errors';
+export { InvalidProviderRunConfigError, UnknownProviderError } from './errors';
 
 // Shared structured-output helpers (cross-provider; the dag-executor validates
 // every provider's output_format result against the declared schema).
 export {
+  compileOutputSchema,
   validateStructuredOutput,
   formatSchemaErrors,
   type StructuredValidationResult,
@@ -50,14 +53,27 @@ export { ClaudeProvider } from './claude/provider';
 export { CodexProvider } from './codex/provider';
 
 // Config parsers
-export { parseClaudeConfig, type ClaudeProviderDefaults } from './claude/config';
+export {
+  parseClaudeConfig,
+  parseClaudeSettingSources,
+  type ClaudeProviderDefaults,
+  type ParsedSettingSources,
+} from './claude/config';
 export { parseCodexConfig, type CodexProviderDefaults } from './codex/config';
 
 // Utilities (needed by consumers)
 export { resetCodexSingleton } from './codex/provider';
 export { loadMcpConfig, type LoadedMcpConfig } from './mcp/config';
-export { resolveCodexBinaryPath, fileExists as codexFileExists } from './codex/binary-resolver';
+export {
+  resolveCodexBinaryPath,
+  resolveCodexBinaryWithSource,
+  fileExists as codexFileExists,
+  type CodexBinarySource,
+} from './codex/binary-resolver';
 export { resolveClaudeBinaryPath, fileExists as claudeFileExists } from './claude/binary-resolver';
+
+// Skills resolution
+export { claudeSkillSearchRoots, findInstalledSkillNames, skillSearchRoots } from './shared/skills';
 
 // Community providers
 export {

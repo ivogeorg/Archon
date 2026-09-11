@@ -35,6 +35,9 @@ export interface HealthResponse {
   runningWorkflows: number;
   version?: string;
   is_docker: boolean;
+  is_wsl: boolean;
+  /** WSL distribution name (e.g. "Ubuntu") — only present when is_wsl is true. */
+  wsl_distro?: string;
   activePlatforms?: string[];
 }
 
@@ -62,6 +65,7 @@ export interface ProviderInfo {
   // reads individual capability fields, only the API populates the full shape.
   capabilities: Partial<components['schemas']['ProviderCapabilities']>;
   builtIn: boolean;
+  effortLevels?: components['schemas']['ProviderInfo']['effortLevels'];
 }
 
 export type ProviderDefaults = Record<string, unknown>;
@@ -155,7 +159,7 @@ export async function updateConversation(
   id: string,
   updates: { title?: string }
 ): Promise<{ success: boolean }> {
-  return fetchJSON(`/api/conversations/${id}`, {
+  return fetchJSON(`/api/conversations/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
@@ -163,7 +167,7 @@ export async function updateConversation(
 }
 
 export async function deleteConversation(id: string): Promise<{ success: boolean }> {
-  return fetchJSON(`/api/conversations/${id}`, { method: 'DELETE' });
+  return fetchJSON(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export async function sendMessage(

@@ -85,17 +85,7 @@ export function buildAssistantUpdate(form: AssistantConfigForm): UpdateAssistant
 // `components['schemas']['TiersConfig']` etc. once the spec is regenerated.
 // ---------------------------------------------------------------------------
 
-/**
- * A tier preset as the UI handles it. `thinking` is intentionally omitted — there
- * is no UI control for it, and the PATCH /api/config/tiers handler drops it on
- * write, so saving a tier here clears any `thinking` set in config.yaml. Known
- * limitation (advanced; rare).
- */
-export interface TierEntry {
-  provider: string;
-  model: string;
-  effort?: string;
-}
+export type TierEntry = components['schemas']['TierEntry'];
 
 export interface TiersMap {
   small?: TierEntry;
@@ -123,7 +113,7 @@ export const TIER_ORDER: readonly TierName[] = ['small', 'medium', 'large'];
 export interface TierRowForm {
   provider: string; // '' = unset (falls back to the built-in default)
   model: string;
-  effort: string;
+  effort: NonNullable<TierEntry['effort']> | '';
 }
 
 export type TiersForm = Record<TierName, TierRowForm>;
@@ -142,8 +132,7 @@ export function buildTiersUpdate(form: TiersForm): UpdateTiersBody {
     const model = row.model.trim();
     if (provider && model) {
       const entry: TierEntry = { provider, model };
-      const effort = row.effort.trim();
-      if (effort) entry.effort = effort;
+      if (row.effort) entry.effort = row.effort;
       tiers[tier] = entry;
     } else {
       tiers[tier] = null;
@@ -182,6 +171,8 @@ export interface UserAiPrefs {
   tiers?: TiersMap;
   aliases?: Record<string, TierEntry>;
   defaultProvider?: string;
+  /** Per-user default CHAT model (#1998) — only meaningful with defaultProvider. */
+  defaultModel?: string;
 }
 
 export function getUserAiPrefs(): Promise<UserAiPrefs> {
@@ -202,10 +193,18 @@ export function updateUserAliases(body: UpdateAliasesBody): Promise<UserAiPrefs>
   });
 }
 
-export function updateUserDefaultProvider(provider: string | null): Promise<UserAiPrefs> {
+/**
+ * Set the per-user default assistant + default chat model. Written atomically
+ * by the server: an omitted/null model clears any previous pin, and a model
+ * without a provider is rejected (400).
+ */
+export function updateUserDefault(
+  provider: string | null,
+  model: string | null
+): Promise<UserAiPrefs> {
   return requestJson<UserAiPrefs>('/api/auth/me/ai-prefs/default', {
     method: 'PATCH',
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify({ provider, model }),
   });
 }
 
@@ -217,7 +216,7 @@ export interface AliasRowForm {
   name: string;
   provider: string;
   model: string;
-  effort: string;
+  effort: NonNullable<TierEntry['effort']> | '';
 }
 
 /** Seed editable alias rows from a saved alias map (sorted by name). */
@@ -247,8 +246,7 @@ export function buildAliasesUpdate(
     const model = row.model.trim();
     if (!name || !provider || !model) continue;
     const entry: TierEntry = { provider, model };
-    const effort = row.effort.trim();
-    if (effort) entry.effort = effort;
+    if (row.effort) entry.effort = row.effort;
     aliases[name] = entry;
   }
   return { aliases };

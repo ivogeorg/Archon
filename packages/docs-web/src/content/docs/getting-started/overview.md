@@ -10,6 +10,8 @@ sidebar:
 
 Everything you need to go from zero to a working Archon setup — whether you prefer the Web UI or the CLI.
 
+> **Looking for RAG, embeddings, or knowledge bases?** You may be thinking of Archon v1–v6, which was a different product. Current Archon (0.x series) is a workflow engine for AI coding agents—no embeddings, no vector stores, no direct LLM API calls. See [What Archon Is (and Is Not)](/getting-started/what-archon-is-not/) for details.
+
 ---
 
 ## Prerequisites
@@ -227,15 +229,21 @@ The AI router automatically picks the right workflow based on your message.
 
 ---
 
-### Path B: CLI (No Server)
+### Path B: CLI from source (No Server)
 
-**Step 4: Install the CLI globally**
+**Step 4: Link the source CLI for terminal development**
 
 ```bash
 cd packages/cli && bun link && cd ../..
 ```
 
-This registers the `archon` command globally so you can run it from any repository.
+This makes the Bun-based source `archon` command available in interactive
+terminals. It requires Bun on `PATH`, and the `~/.bun/bin` setup below applies
+only to shell-launched use.
+
+For a GUI app, service, or other non-shell caller, install the native release
+executable and configure its absolute path instead. See [Using Archon from a GUI
+or service](/getting-started/installation/#using-archon-from-a-gui-or-service).
 
 You'll see output like `Success! Registered "@archon/cli"` followed by a message about `bun link @archon/cli` — **ignore that second part**, it's for adding Archon as a dependency in another project.
 
@@ -273,7 +281,7 @@ archon workflow run archon-fix-github-issue --branch fix/issue-42 "Fix issue #42
 
 That's it. The CLI auto-detects the git repo, uses SQLite for state tracking (`~/.archon/archon.db`), and streams output to stdout.
 
-> **The target directory must be a git repository.** Archon uses git worktrees for isolation, so it needs a `.git` folder. If your project isn't a git repo yet, run `git init && git add . && git commit -m "initial commit"` first.
+> **The target directory is usually a git repository.** Archon uses git worktrees for isolation, so a git repo gets a `.git` folder and per-run branch isolation. But a non-git directory — a multi-repo root or an ops folder — can be registered as a [folder project](/getting-started/concepts/#folder-projects-non-git-workspaces) with `--folder` instead, running in place with no worktree. If you want git isolation and your project isn't a repo yet, run `git init && git add . && git commit -m "initial commit"` first.
 
 ---
 
@@ -304,15 +312,16 @@ archon workflow run <name> --cwd /path/to/repo "<message>"
 |---------|-------------|
 | `archon chat <message>` | Send a message to the orchestrator |
 | `archon setup` | Interactive setup wizard for credentials and config |
-| `archon doctor` | Verify your setup (Claude binary, gh auth, DB, adapters) |
+| `archon doctor` | Verify your setup (Claude/Codex binaries, gh auth, DB, adapters; `--full` also probes the OpenCode runtime) |
 | `archon workflow list` | List available workflows |
 | `archon workflow run <name> [msg]` | Run a workflow (`--detach` to background it) |
 | `archon workflow status` | Show active runs (running + paused) |
 | `archon workflow runs` | List recent runs of every status for this project |
 | `archon workflow get <id>` | Show detail for a single run (any status) |
-| `archon workflow resume <id>` | Resume a failed workflow |
+| `archon workflow resume <id>` | Resume a failed or paused workflow |
+| `archon workflow cancel <id>` | Actively stop a running detached CLI workflow |
 | `archon workflow abandon <id>` | Abandon a run (running, paused, or failed) |
-| `archon workflow approve <id> [comment]` | Approve an interactive loop gate |
+| `archon workflow approve <id> [comment]` | Approve an interactive loop gate (no comment on a signal-bearing gate = accept & complete; a comment runs another iteration) |
 | `archon workflow reject <id> [--reason "..."]` | Reject an approval gate |
 | `archon workflow cleanup [days]` | Delete old run records (default: 7 days) |
 | `archon workflow event emit` | Emit a workflow event |
@@ -387,7 +396,7 @@ commands:
   folder: .claude/commands/archon    # additional command search path
 worktree:
   copyFiles:                         # gitignored files/dirs to copy into worktrees
-    - .env                           # (`.archon/` is copied automatically — no need to list it)
+    - .env                           # nothing is copied unless listed here
     - plans/
 ```
 
@@ -408,7 +417,7 @@ argument-hint: <module>
 Run tests for: $ARGUMENTS
 ```
 
-Variables available: `$1`, `$2`, `$3` (positional), `$ARGUMENTS` (all args), `$ARTIFACTS_DIR` (workflow artifacts directory), `$WORKFLOW_ID` (run ID), `$BASE_BRANCH` (base branch), `$nodeId.output` (DAG node output).
+Variables available: `$ARGUMENTS` / `$USER_MESSAGE` (the whole trigger message — positional `$1`/`$2`/`$3` are not supported), `$ARTIFACTS_DIR` (workflow artifacts directory), `$WORKFLOW_ID` (run ID), `$BASE_BRANCH` (base branch), `$nodeId.output` (DAG node output).
 
 ### Custom Workflows
 
@@ -467,14 +476,14 @@ If you want Claude Code to be able to invoke Archon workflows on your behalf, in
 Archon skill into your project. The setup wizard handles this automatically — just run
 `archon setup` and accept the skill installation prompt.
 
-To install manually instead, run `archon skill install /path/to/your/repo` (which writes both the `archon` and `manage-run` skills), or copy them by hand:
+To install manually instead, run `archon skill install /path/to/your/repo`, or copy it by hand:
 
 ```bash
-cp -r Archon/.claude/skills/archon /path/to/your/repo/.claude/skills/
-cp -r Archon/.claude/skills/manage-run /path/to/your/repo/.claude/skills/
+mkdir -p /path/to/your/repo/.claude/skills
+cp -r Archon/.claude/skills/archon-cli /path/to/your/repo/.claude/skills/
 ```
 
-Then in Claude Code, say things like "use archon to fix issue #42" and it will invoke the appropriate workflow. The `manage-run` skill lets it inspect and control runs (`archon workflow runs`/`get`/`approve`...).
+Then in Claude Code, say things like "use archon to fix issue #42" and the `archon-cli` skill routes it: running workflows, managing runs, setup/config, or authoring new ones.
 
 ---
 
